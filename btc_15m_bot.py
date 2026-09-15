@@ -13,8 +13,8 @@ from matplotlib.patches import Rectangle
 
 CHAT_ID = "5467490148"
 
-SYMBOL = "BTCUSDT"
-INTERVAL = "15m"
+PRODUCT_ID = "BTC-USD"
+GRANULARITY = 900
 CANDLE_LIMIT = 80
 
 
@@ -31,35 +31,42 @@ def get_token():
 
 def get_btc_data():
 
-    url = "https://api.binance.com/api/v3/klines"
+    url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
 
     params = {
-        "symbol": SYMBOL,
-        "interval": INTERVAL,
-        "limit": CANDLE_LIMIT
+        "granularity": GRANULARITY
     }
 
     response = requests.get(
         url,
         params=params,
-        timeout=30
+        timeout=30,
+        headers={
+            "User-Agent": "BTC-15M-Telegram-Bot"
+        }
     )
 
     response.raise_for_status()
 
-    return response.json()
+    data = response.json()
+
+    # Coinbase returns:
+    # [time, low, high, open, close, volume]
+    data = sorted(data, key=lambda x: x[0])
+
+    return data[-CANDLE_LIMIT:]
 
 
 def make_chart(candles):
 
     times = [
-        datetime.fromtimestamp(candle[0] / 1000)
+        datetime.fromtimestamp(candle[0])
         for candle in candles
     ]
 
-    opens = [float(candle[1]) for candle in candles]
+    lows = [float(candle[1]) for candle in candles]
     highs = [float(candle[2]) for candle in candles]
-    lows = [float(candle[3]) for candle in candles]
+    opens = [float(candle[3]) for candle in candles]
     closes = [float(candle[4]) for candle in candles]
 
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -84,7 +91,7 @@ def make_chart(candles):
             linewidth=1
         )
 
-        # Candle body
+        # Body
         bottom = min(open_price, close_price)
         height = abs(close_price - open_price)
 
@@ -101,9 +108,9 @@ def make_chart(candles):
 
         ax.add_patch(rectangle)
 
-    ax.set_title("BTC/USDT - 15 Minute Candlestick")
+    ax.set_title("BTC/USD - 15 Minute Candlestick")
     ax.set_xlabel("Time")
-    ax.set_ylabel("Price (USDT)")
+    ax.set_ylabel("Price (USD)")
 
     step = max(1, len(times) // 10)
 
@@ -179,6 +186,11 @@ def main():
 
     candles = get_btc_data()
 
+    if not candles:
+        raise RuntimeError(
+            "No BTC candle data received."
+        )
+
     chart = make_chart(candles)
 
     send_to_telegram(
@@ -186,7 +198,9 @@ def main():
         token
     )
 
-    print("✅ BTC 15M candlestick sent to Telegram!")
+    print(
+        "✅ BTC 15M candlestick sent to Telegram!"
+    )
 
 
 if __name__ == "__main__":
