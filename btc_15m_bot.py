@@ -3,10 +3,8 @@ from datetime import datetime
 from io import BytesIO
 
 import requests
-
 import matplotlib
 matplotlib.use("Agg")
-
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
@@ -22,9 +20,7 @@ def get_token():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
     if not token:
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN secret is not set."
-        )
+        raise RuntimeError("TELEGRAM_BOT_TOKEN secret is not set.")
 
     return token
 
@@ -33,28 +29,72 @@ def get_btc_data():
 
     url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
 
-    params = {
-        "granularity": GRANULARITY
-    }
-
     response = requests.get(
         url,
-        params=params,
+        params={"granularity": GRANULARITY},
         timeout=30,
-        headers={
-            "User-Agent": "BTC-15M-Telegram-Bot"
-        }
+        headers={"User-Agent": "BTC-15M-Telegram-Bot"}
     )
 
     response.raise_for_status()
 
     data = response.json()
-
-    # Coinbase returns:
-    # [time, low, high, open, close, volume]
     data = sorted(data, key=lambda x: x[0])
 
     return data[-CANDLE_LIMIT:]
+
+
+def calculate_signal(candles):
+
+    closes = [float(candle[4]) for candle in candles]
+
+    if len(closes) < 22:
+        return "WAIT", "Not enough data"
+
+    # EMA 9
+    ema9 = closes[0]
+    multiplier9 = 2 / (9 + 1)
+
+    for price in closes[1:]:
+        ema9 = (price - ema9) * multiplier9 + ema9
+
+    # EMA 21
+    ema21 = closes[0]
+    multiplier21 = 2 / (21 + 1)
+
+    for price in closes[1:]:
+        ema21 = (price - ema21) * multiplier21 + ema21
+
+    # RSI 14
+    gains = []
+    losses = []
+
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+
+        if change > 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+
+    avg_gain = sum(gains[-14:]) / 14
+    avg_loss = sum(losses[-14:]) / 14
+
+    if avg_loss == 0:
+        rsi = 100
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+
+    if ema9 > ema21 and rsi >= 55:
+        return "BUY", f"EMA9 > EMA21 | RSI {rsi:.1f}"
+
+    if ema9 < ema21 and rsi <= 45:
+        return "SELL", f"EMA9 < EMA21 | RSI {rsi:.1f}"
+
+    return "WAIT", f"EMA9/EMA21 unclear | RSI {rsi:.1f}"
 
 
 def make_chart(candles):
@@ -83,7 +123,6 @@ def make_chart(candles):
         else:
             candle_color = "red"
 
-        # Wick
         ax.vlines(
             i,
             low_price,
@@ -91,7 +130,6 @@ def make_chart(candles):
             linewidth=1
         )
 
-        # Body
         bottom = min(open_price, close_price)
         height = abs(close_price - open_price)
 
@@ -114,9 +152,7 @@ def make_chart(candles):
 
     step = max(1, len(times) // 10)
 
-    ax.set_xticks(
-        range(0, len(times), step)
-    )
+    ax.set_xticks(range(0, len(times), step))
 
     ax.set_xticklabels(
         [
@@ -145,23 +181,25 @@ def make_chart(candles):
     return image
 
 
-def send_to_telegram(image, token):
+def send_to_telegram(image, token, signal, reason):
 
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
 
-    now = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    caption = (
+        "🕯️ BTC 15M Candlestick\n\n"
+        f"📌 Signal: {signal}\n"
+        f"📊 {reason}\n"
+        f"🕒 {now}\n\n"
+        "⚠️ Technical signal only."
     )
 
     response = requests.post(
         url,
         data={
             "chat_id": CHAT_ID,
-            "caption": (
-                "🕯️ BTC 15M Candlestick Chart\n"
-                f"🕒 {now}\n"
-                "⏳ Next update in 15 minutes."
-            )
+            "caption": caption
         },
         files={
             "photo": (
@@ -178,7 +216,7 @@ def send_to_telegram(image, token):
 
 def main():
 
-    print("🚀 BTC 15M Cloud Bot started!")
+    print("🚀 BTC 15M Signal Bot started!")
 
     token = get_token()
 
@@ -187,20 +225,23 @@ def main():
     candles = get_btc_data()
 
     if not candles:
-        raise RuntimeError(
-            "No BTC candle data received."
-        )
+        raise RuntimeError("No BTC candle data received.")
+
+    signal, reason = calculate_signal(candles)
+
+    print(f"📌 Signal: {signal}")
+    print(f"📊 Reason: {reason}")
 
     chart = make_chart(candles)
 
     send_to_telegram(
         chart,
-        token
+        token,
+        signal,
+        reason
     )
 
-    print(
-        "✅ BTC 15M candlestick sent to Telegram!"
-    )
+    print("✅ BTC chart + signal sent to Telegram!")
 
 
 if __name__ == "__main__":
