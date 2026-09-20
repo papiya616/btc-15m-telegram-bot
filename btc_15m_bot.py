@@ -13,7 +13,7 @@ CHAT_ID = "5467490148"
 
 PRODUCT_ID = "BTC-USD"
 GRANULARITY = 900
-CANDLE_LIMIT = 80
+CANDLE_LIMIT = 100
 
 
 def get_token():
@@ -33,7 +33,7 @@ def get_btc_data():
         url,
         params={"granularity": GRANULARITY},
         timeout=30,
-        headers={"User-Agent": "BTC-15M-Telegram-Bot"}
+        headers={"User-Agent": "BTC-15M-Advanced-Bot"}
     )
 
     response.raise_for_status()
@@ -44,70 +44,260 @@ def get_btc_data():
     return data[-CANDLE_LIMIT:]
 
 
-def calculate_signal(candles):
+def ema(values, period):
 
-    closes = [float(candle[4]) for candle in candles]
+    multiplier = 2 / (period + 1)
 
-    if len(closes) < 22:
-        return "WAIT", "Not enough data"
+    result = values[0]
 
-    # EMA 9
-    ema9 = closes[0]
-    multiplier9 = 2 / (9 + 1)
+    for price in values[1:]:
+        result = (price - result) * multiplier + result
 
-    for price in closes[1:]:
-        ema9 = (price - ema9) * multiplier9 + ema9
+    return result
 
-    # EMA 21
-    ema21 = closes[0]
-    multiplier21 = 2 / (21 + 1)
 
-    for price in closes[1:]:
-        ema21 = (price - ema21) * multiplier21 + ema21
+def calculate_rsi(closes, period=14):
 
-    # RSI 14
-    gains = []
-    losses = []
+    changes = []
 
     for i in range(1, len(closes)):
-        change = closes[i] - closes[i - 1]
+        changes.append(closes[i] - closes[i - 1])
 
-        if change > 0:
-            gains.append(change)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(change))
+    gains = [max(change, 0) for change in changes]
+    losses = [max(-change, 0) for change in changes]
 
-    avg_gain = sum(gains[-14:]) / 14
-    avg_loss = sum(losses[-14:]) / 14
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
 
     if avg_loss == 0:
-        rsi = 100
+        return 100
+
+    rs = avg_gain / avg_loss
+
+    return 100 - (100 / (1 + rs))
+
+
+def calculate_macd(closes):
+
+    ema12 = ema(closes, 12)
+    ema26 = ema(closes, 26)
+
+    macd = ema12 - ema26
+
+    # Approximation of MACD signal line
+    previous_closes = closes[:-1]
+
+    if len(previous_closes) >= 26:
+        previous_macd = (
+            ema(previous_closes, 12)
+            - ema(previous_closes, 26)
+        )
     else:
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
+        previous_macd = macd
 
-    if ema9 > ema21 and rsi >= 55:
-        return "BUY", f"EMA9 > EMA21 | RSI {rsi:.1f}"
+    return macd, previous_macd
 
-    if ema9 < ema21 and rsi <= 45:
-        return "SELL", f"EMA9 < EMA21 | RSI {rsi:.1f}"
 
-    return "WAIT", f"EMA9/EMA21 unclear | RSI {rsi:.1f}"
+def calculate_atr(candles, period=14):
+
+    true_ranges = []
+
+    for i in range(1, len(candles)):
+
+        high = float(candles[i][2])
+        low = float(candles[i][1])
+        previous_close = float(candles[i - 1][4])
+
+        tr = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close)
+        )
+
+        true_ranges.append(tr)
+
+    return sum(true_ranges[-period:]) / period
+
+
+def calculate_signal(candles):
+
+    if len(candles) < 30:
+        return {
+            "signal": "WAIT",
+            "score": 0,
+            "reason": "Not enough candle data"
+        }
+
+    closes = [float(c[4]) for c in candles]
+    volumes = [float(c[5]) for c in candles]
+
+    current_price = closes[-1]
+
+    # -------------------------
+    # EMA TREND
+    # -------------------------
+
+    ema9 = ema(closes, 9)
+    ema21 = ema(closes, 21)
+
+    # -------------------------
+    # RSI
+    # -------------------------
+
+    rsi = calculate_rsi(closes)
+
+    # -------------------------
+    # MACD
+    # -------------------------
+
+    macd, previous_macd = calculate_macd(closes)
+
+    # -------------------------
+    # VOLUME
+    # -------------------------
+
+    recent_volume = sum(volumes[-5:]) / 5
+    older_volume = sum(volumes[-20:-5]) / 15
+
+    volume_strong = recent_volume > older_volume * 1.10
+
+    # -------------------------
+    # SUPPORT / RESISTANCE
+    # -------------------------
+
+    recent_high = max(
+        float(c[2]) for c in candles[-20:]
+    )
+
+    recent_low = min(
+        float(c[1]) for c in candles[-20:]
+    )
+
+    distance_to_resistance = (
+        (recent_high - current_price)
+        / current_price
+    ) * 100
+
+    distance_to_support = (
+        (current_price - recent_low)
+        / current_price
+    ) * 100
+
+    # -------------------------
+    # ATR
+    # -------------------------
+
+    atr = calculate_atr(candles)
+
+    # -------------------------
+    # SCORING
+    # -------------------------
+
+    buy_score = 0
+    sell_score = 0
+
+    reasons = []
+
+    # EMA
+    if ema9 > ema21:
+        buy_score += 2
+        reasons.append("EMA bullish")
+    elif ema9 < ema21:
+        sell_score += 2
+        reasons.append("EMA bearish")
+
+    # RSI
+    if 55 <= rsi <= 70:
+        buy_score += 2
+        reasons.append(f"RSI bullish {rsi:.1f}")
+
+    elif 30 <= rsi <= 45:
+        sell_score += 2
+        reasons.append(f"RSI bearish {rsi:.1f}")
+
+    elif rsi > 70:
+        reasons.append(f"RSI overbought {rsi:.1f}")
+
+    elif rsi < 30:
+        reasons.append(f"RSI oversold {rsi:.1f}")
+
+    # MACD
+    if macd > 0 and macd >= previous_macd:
+        buy_score += 2
+        reasons.append("MACD bullish")
+
+    elif macd < 0 and macd <= previous_macd:
+        sell_score += 2
+        reasons.append("MACD bearish")
+
+    # Volume
+    if volume_strong:
+
+        if buy_score > sell_score:
+            buy_score += 1
+            reasons.append("Volume confirmed")
+
+        elif sell_score > buy_score:
+            sell_score += 1
+            reasons.append("Volume confirmed")
+
+    # Support / Resistance protection
+    near_resistance = distance_to_resistance < 0.40
+    near_support = distance_to_support < 0.40
+
+    if near_resistance:
+        buy_score -= 2
+        reasons.append("Near resistance")
+
+    if near_support:
+        sell_score -= 2
+        reasons.append("Near support")
+
+    # -------------------------
+    # FINAL SIGNAL
+    # -------------------------
+
+    if buy_score >= 5 and buy_score > sell_score:
+
+        signal = "BUY"
+
+    elif sell_score >= 5 and sell_score > buy_score:
+
+        signal = "SELL"
+
+    else:
+
+        signal = "WAIT"
+
+    score = max(buy_score, sell_score)
+
+    reason_text = " | ".join(reasons)
+
+    return {
+        "signal": signal,
+        "score": score,
+        "reason": reason_text,
+        "price": current_price,
+        "rsi": rsi,
+        "ema9": ema9,
+        "ema21": ema21,
+        "atr": atr,
+        "support": recent_low,
+        "resistance": recent_high
+    }
 
 
 def make_chart(candles):
 
     times = [
-        datetime.fromtimestamp(candle[0])
-        for candle in candles
+        datetime.fromtimestamp(c[0])
+        for c in candles
     ]
 
-    lows = [float(candle[1]) for candle in candles]
-    highs = [float(candle[2]) for candle in candles]
-    opens = [float(candle[3]) for candle in candles]
-    closes = [float(candle[4]) for candle in candles]
+    lows = [float(c[1]) for c in candles]
+    highs = [float(c[2]) for c in candles]
+    opens = [float(c[3]) for c in candles]
+    closes = [float(c[4]) for c in candles]
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -146,7 +336,7 @@ def make_chart(candles):
 
         ax.add_patch(rectangle)
 
-    ax.set_title("BTC/USD - 15 Minute Candlestick")
+    ax.set_title("BTC/USD - 15 Minute Advanced Analysis")
     ax.set_xlabel("Time")
     ax.set_ylabel("Price (USD)")
 
@@ -181,18 +371,34 @@ def make_chart(candles):
     return image
 
 
-def send_to_telegram(image, token, signal, reason):
+def send_to_telegram(image, token, analysis):
 
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
     caption = (
-        "🕯️ BTC 15M Candlestick\n\n"
-        f"📌 Signal: {signal}\n"
-        f"📊 {reason}\n"
+        "🕯️ BTC 15M Advanced Signal\n\n"
+
+        f"📌 Signal: {analysis['signal']}\n"
+        f"⭐ Score: {analysis['score']}\n\n"
+
+        f"💰 Price: ${analysis['price']:,.2f}\n"
+        f"📊 RSI: {analysis['rsi']:.1f}\n"
+
+        f"📈 EMA9: ${analysis['ema9']:,.2f}\n"
+        f"📉 EMA21: ${analysis['ema21']:,.2f}\n\n"
+
+        f"🟢 Support: ${analysis['support']:,.2f}\n"
+        f"🔴 Resistance: ${analysis['resistance']:,.2f}\n\n"
+
+        f"🔎 {analysis['reason']}\n\n"
+
         f"🕒 {now}\n\n"
-        "⚠️ Technical signal only."
+
+        "⚠️ Technical analysis only."
     )
 
     response = requests.post(
@@ -216,7 +422,7 @@ def send_to_telegram(image, token, signal, reason):
 
 def main():
 
-    print("🚀 BTC 15M Signal Bot started!")
+    print("🚀 BTC 15M Advanced Signal Bot started!")
 
     token = get_token()
 
@@ -225,23 +431,35 @@ def main():
     candles = get_btc_data()
 
     if not candles:
-        raise RuntimeError("No BTC candle data received.")
+        raise RuntimeError(
+            "No BTC candle data received."
+        )
 
-    signal, reason = calculate_signal(candles)
+    analysis = calculate_signal(candles)
 
-    print(f"📌 Signal: {signal}")
-    print(f"📊 Reason: {reason}")
+    print(
+        f"📌 Signal: {analysis['signal']}"
+    )
+
+    print(
+        f"⭐ Score: {analysis['score']}"
+    )
+
+    print(
+        f"🔎 {analysis['reason']}"
+    )
 
     chart = make_chart(candles)
 
     send_to_telegram(
         chart,
         token,
-        signal,
-        reason
+        analysis
     )
 
-    print("✅ BTC chart + signal sent to Telegram!")
+    print(
+        "✅ Advanced BTC chart + signal sent!"
+    )
 
 
 if __name__ == "__main__":
