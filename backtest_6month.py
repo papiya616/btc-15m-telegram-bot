@@ -4,23 +4,21 @@ from datetime import datetime, timezone, timedelta
 
 PRODUCT_ID = "BTC-USD"
 GRANULARITY = 900
-CANDLE_LIMIT = 300
+LOOKBACK = 100
 
 
 def get_candles(start_time, end_time):
     url = f"https://api.exchange.coinbase.com/products/{PRODUCT_ID}/candles"
 
-    params = {
-        "granularity": GRANULARITY,
-        "start": start_time.isoformat(),
-        "end": end_time.isoformat()
-    }
-
     response = requests.get(
         url,
-        params=params,
+        params={
+            "granularity": GRANULARITY,
+            "start": start_time.isoformat(),
+            "end": end_time.isoformat()
+        },
         timeout=30,
-        headers={"User-Agent": "BTC-6-Month-Backtest"}
+        headers={"User-Agent": "BTC-Pattern-Backtest"}
     )
 
     response.raise_for_status()
@@ -33,8 +31,6 @@ def get_six_month_data():
 
     all_candles = []
     current = start
-
-    # 250 candles × 15 minutes
     chunk = timedelta(minutes=15 * 250)
 
     print("📥 Downloading 6 months of BTC 15M data...")
@@ -50,15 +46,14 @@ def get_six_month_data():
         )
 
         try:
-            candles = get_candles(current, chunk_end)
-            all_candles.extend(candles)
-        except Exception as e:
-            print("Download error:", e)
+            data = get_candles(current, chunk_end)
+            all_candles.extend(data)
+        except Exception as error:
+            print("Download error:", error)
 
         current = chunk_end
         time.sleep(0.3)
 
-    # Remove duplicates
     unique = {}
 
     for candle in all_candles:
@@ -82,11 +77,11 @@ def ema(values, period):
     return result
 
 
-def calculate_rsi(closes, period=14):
-    changes = []
-
-    for i in range(1, len(closes)):
-        changes.append(closes[i] - closes[i - 1])
+def rsi(closes, period=14):
+    changes = [
+        closes[i] - closes[i - 1]
+        for i in range(1, len(closes))
+    ]
 
     gains = [max(x, 0) for x in changes]
     losses = [max(-x, 0) for x in changes]
@@ -102,75 +97,41 @@ def calculate_rsi(closes, period=14):
     return 100 - (100 / (1 + rs))
 
 
-def calculate_macd(closes):
-    macd_now = ema(closes, 12) - ema(closes, 26)
+def macd(closes):
+    now = ema(closes, 12) - ema(closes, 26)
 
     previous = closes[:-1]
 
     if len(previous) >= 26:
-        macd_previous = ema(previous, 12) - ema(previous, 26)
+        old = ema(previous, 12) - ema(previous, 26)
     else:
-        macd_previous = macd_now
+        old = now
 
-    return macd_now, macd_previous
+    return now, old
 
 
-def get_signal(history):
+def analyze_market(history):
 
-    closes = [float(c[4]) for c in history]
-    volumes = [float(c[5]) for c in history]
+    closes = [float(x[4]) for x in history]
+    volumes = [float(x[5]) for x in history]
 
     price = closes[-1]
 
     ema9 = ema(closes, 9)
     ema21 = ema(closes, 21)
 
-    rsi = calculate_rsi(closes)
+    current_rsi = rsi(closes)
 
-    macd, previous_macd = calculate_macd(closes)
+    macd_now, macd_old = macd(closes)
 
     recent_volume = sum(volumes[-5:]) / 5
     old_volume = sum(volumes[-20:-5]) / 15
 
     volume_strong = recent_volume > old_volume * 1.10
 
-    recent_high = max(float(c[2]) for c in history[-20:])
-    recent_low = min(float(c[1]) for c in history[-20:])
+    recent_high = max(float(x[2]) for x in history[-20:])
+    recent_low = min(float(x[1]) for x in history[-20:])
 
-    buy_score = 0
-    sell_score = 0
-
-    # EMA
-    if ema9 > ema21:
-        buy_score += 2
-
-    elif ema9 < ema21:
-        sell_score += 2
-
-    # RSI
-    if 55 <= rsi <= 70:
-        buy_score += 2
-
-    elif 30 <= rsi <= 45:
-        sell_score += 2
-
-    # MACD
-    if macd > 0 and macd >= previous_macd:
-        buy_score += 2
-
-    elif macd < 0 and macd <= previous_macd:
-        sell_score += 2
-
-    # Volume
-    if volume_strong:
-
-        if buy_score > sell_score:
-            buy_score += 1
-
-        elif sell_score > buy_score:
-            sell_score += 1
-
-    # Resistance / support
     resistance_distance = (
         (recent_high - price) / price
     ) * 100
@@ -179,113 +140,285 @@ def get_signal(history):
         (price - recent_low) / price
     ) * 100
 
+    buy_score = 0
+    sell_score = 0
+
+    conditions = []
+
+    # EMA trend
+    if ema9 > ema21:
+        buy_score += 2
+        conditions.append("EMA_BULLISH")
+
+    elif ema9 < ema21:
+        sell_score += 2
+        conditions.append("EMA_BEARISH")
+
+    # RSI
+    if 55 <= current_rsi <= 70:
+        buy_score += 2
+        conditions.append("RSI_BULLISH")
+
+    elif 30 <= current_rsi <= 45:
+        sell_score += 2
+        conditions.append("RSI_BEARISH")
+
+    elif current_rsi > 70:
+        conditions.append("RSI_OVERBOUGHT")
+
+    elif current_rsi < 30:
+        conditions.append("RSI_OVERSOLD")
+
+    else:
+        conditions.append("RSI_NEUTRAL")
+
+    # MACD
+    if macd_now > 0 and macd_now >= macd_old:
+        buy_score += 2
+        conditions.append("MACD_BULLISH")
+
+    elif macd_now < 0 and macd_now <= macd_old:
+        sell_score += 2
+        conditions.append("MACD_BEARISH")
+
+    else:
+        conditions.append("MACD_NEUTRAL")
+
+    # Volume
+    if volume_strong:
+        conditions.append("VOLUME_STRONG")
+
+        if buy_score > sell_score:
+            buy_score += 1
+
+        elif sell_score > buy_score:
+            sell_score += 1
+
+    else:
+        conditions.append("VOLUME_NORMAL")
+
+    # Support / resistance
     if resistance_distance < 0.40:
         buy_score -= 2
+        conditions.append("NEAR_RESISTANCE")
 
     if support_distance < 0.40:
         sell_score -= 2
+        conditions.append("NEAR_SUPPORT")
 
     if buy_score >= 5 and buy_score > sell_score:
-        return "BUY"
+        signal = "BUY"
 
-    if sell_score >= 5 and sell_score > buy_score:
-        return "SELL"
+    elif sell_score >= 5 and sell_score > buy_score:
+        signal = "SELL"
 
-    return "WAIT"
+    else:
+        signal = "WAIT"
 
-
-def run_backtest(candles):
-
-    results = {
-        15: {"BUY": [0, 0], "SELL": [0, 0]},
-        30: {"BUY": [0, 0], "SELL": [0, 0]},
-        45: {"BUY": [0, 0], "SELL": [0, 0]}
+    return {
+        "signal": signal,
+        "conditions": conditions,
+        "price": price,
+        "rsi": current_rsi,
+        "ema9": ema9,
+        "ema21": ema21
     }
 
-    lookback = 100
 
-    print("🔎 Running 6-month historical test...")
+def percent_change(entry, future):
+    return ((future - entry) / entry) * 100
 
-    for i in range(lookback, len(candles) - 3):
 
-        history = candles[i - lookback:i]
+def run_pattern_test(candles):
 
-        signal = get_signal(history)
+    results = {
+        "BUY": {
+            "total": 0,
+            "up15": 0,
+            "up30": 0,
+            "up45": 0
+        },
+        "SELL": {
+            "total": 0,
+            "down15": 0,
+            "down30": 0,
+            "down45": 0
+        }
+    }
+
+    condition_stats = {}
+
+    movement = {
+        "BUY": {15: [], 30: [], 45: []},
+        "SELL": {15: [], 30: [], 45: []}
+    }
+
+    print("🔎 Running 6-month pattern test...")
+
+    for i in range(LOOKBACK, len(candles) - 3):
+
+        history = candles[i - LOOKBACK:i]
+
+        analysis = analyze_market(history)
+
+        signal = analysis["signal"]
 
         if signal == "WAIT":
             continue
 
-        entry_price = float(candles[i][4])
+        entry = float(candles[i][4])
+
+        results[signal]["total"] += 1
+
+        condition_key = "|".join(
+            sorted(analysis["conditions"])
+        )
+
+        if condition_key not in condition_stats:
+            condition_stats[condition_key] = {
+                "signals": 0,
+                "up": 0,
+                "down": 0
+            }
+
+        condition_stats[condition_key]["signals"] += 1
 
         for minutes in [15, 30, 45]:
 
-            future_index = i + (minutes // 15)
+            future_index = i + minutes // 15
 
-            if future_index >= len(candles):
-                continue
+            future_price = float(
+                candles[future_index][4]
+            )
 
-            future_price = float(candles[future_index][4])
+            move = percent_change(
+                entry,
+                future_price
+            )
 
-            results[minutes][signal][1] += 1
+            movement[signal][minutes].append(move)
 
-            if signal == "BUY" and future_price > entry_price:
-                results[minutes][signal][0] += 1
+            if move > 0:
+                condition_stats[condition_key]["up"] += 1
 
-            elif signal == "SELL" and future_price < entry_price:
-                results[minutes][signal][0] += 1
+            elif move < 0:
+                condition_stats[condition_key]["down"] += 1
 
-    return results
+            if signal == "BUY":
+
+                if move > 0:
+                    results["BUY"][f"up{minutes}"] += 1
+
+            elif signal == "SELL":
+
+                if move < 0:
+                    results["SELL"][f"down{minutes}"] += 1
+
+    return results, condition_stats, movement
 
 
-def print_results(results):
+def average(values):
+
+    if not values:
+        return 0
+
+    return sum(values) / len(values)
+
+
+def print_results(results, condition_stats, movement):
 
     print()
-    print("=" * 55)
-    print("📊 BTC 15M — 6 MONTH HISTORICAL BACKTEST")
-    print("=" * 55)
+    print("=" * 65)
+    print("📊 BTC 15M — 6 MONTH MARKET PATTERN TEST")
+    print("=" * 65)
 
-    for minutes in [15, 30, 45]:
+    for signal in ["BUY", "SELL"]:
 
         print()
-        print(f"⏱️ {minutes} MINUTES")
+        print(f"📌 {signal} SIGNALS")
+        print("-" * 65)
 
-        for signal in ["BUY", "SELL"]:
+        total = results[signal]["total"]
 
-            successful, total = results[minutes][signal]
+        print(f"Total signals: {total}")
 
-            if total > 0:
-                accuracy = (successful / total) * 100
+        for minutes in [15, 30, 45]:
+
+            if signal == "BUY":
+                successful = results["BUY"][f"up{minutes}"]
             else:
-                accuracy = 0
+                successful = results["SELL"][f"down{minutes}"]
+
+            accuracy = (
+                successful / total * 100
+                if total else 0
+            )
+
+            avg_move = average(
+                movement[signal][minutes]
+            )
 
             print(
-                f"{signal}: "
-                f"Successful {successful} / "
-                f"Total {total} "
-                f"({accuracy:.1f}%)"
+                f"{minutes}M → "
+                f"correct direction: "
+                f"{successful}/{total} "
+                f"({accuracy:.1f}%) | "
+                f"average move: {avg_move:.3f}%"
             )
 
     print()
-    print("=" * 55)
-    print("⚠️ Historical backtest only.")
-    print("⚠️ Past results do not guarantee future results.")
-    print("=" * 55)
+    print("=" * 65)
+    print("🔎 MARKET CONDITION PATTERNS")
+    print("=" * 65)
+
+    sorted_conditions = sorted(
+        condition_stats.items(),
+        key=lambda x: x[1]["signals"],
+        reverse=True
+    )
+
+    for conditions, data in sorted_conditions[:15]:
+
+        signals = data["signals"]
+        up = data["up"]
+        down = data["down"]
+
+        up_percent = up / signals * 100
+        down_percent = down / signals * 100
+
+        print()
+        print(f"Condition: {conditions}")
+        print(f"Signals: {signals}")
+        print(f"Price UP: {up_percent:.1f}%")
+        print(f"Price DOWN: {down_percent:.1f}%")
+
+    print()
+    print("=" * 65)
+    print("⚠️ This is historical analysis, not a future prediction.")
+    print("⚠️ Historical patterns do not guarantee future results.")
+    print("=" * 65)
 
 
 def main():
 
-    print("🚀 BTC 6-Month Backtest Started!")
+    print("🚀 BTC 6-Month Pattern Backtest Started!")
 
     candles = get_six_month_data()
 
     if len(candles) < 1000:
         raise RuntimeError(
-            "Not enough historical candle data."
+            "Not enough historical data."
         )
 
-    results = run_backtest(candles)
+    results, conditions, movement = run_pattern_test(
+        candles
+    )
 
-    print_results(results)
+    print_results(
+        results,
+        conditions,
+        movement
+    )
 
 
 if __name__ == "__main__":
