@@ -6,6 +6,10 @@ PRODUCT_ID = "BTC-USD"
 GRANULARITY = 900
 LOOKBACK = 100
 
+# Test settings
+TP_PERCENT = 0.30
+SL_PERCENT = 0.20
+
 
 def get_candles(start_time, end_time):
     url = f"https://api.exchange.coinbase.com/products/{PRODUCT_ID}/candles"
@@ -78,6 +82,9 @@ def ema(values, period):
 
 
 def rsi(closes, period=14):
+    if len(closes) <= period:
+        return 50
+
     changes = [
         closes[i] - closes[i - 1]
         for i in range(1, len(closes))
@@ -145,7 +152,7 @@ def analyze_market(history):
 
     conditions = []
 
-    # EMA trend
+    # EMA
     if ema9 > ema21:
         buy_score += 2
         conditions.append("EMA_BULLISH")
@@ -197,7 +204,7 @@ def analyze_market(history):
     else:
         conditions.append("VOLUME_NORMAL")
 
-    # Support / resistance
+    # Support / Resistance
     if resistance_distance < 0.40:
         buy_score -= 2
         conditions.append("NEAR_RESISTANCE")
@@ -225,37 +232,76 @@ def analyze_market(history):
     }
 
 
-def percent_change(entry, future):
-    return ((future - entry) / entry) * 100
+def check_trade(candles, entry_index, signal):
+
+    entry = float(candles[entry_index][4])
+
+    if signal == "BUY":
+        tp_price = entry * (1 + TP_PERCENT / 100)
+        sl_price = entry * (1 - SL_PERCENT / 100)
+
+    else:
+        tp_price = entry * (1 - TP_PERCENT / 100)
+        sl_price = entry * (1 + SL_PERCENT / 100)
+
+    max_bars = min(12, len(candles) - entry_index - 1)
+
+    for j in range(1, max_bars + 1):
+
+        candle = candles[entry_index + j]
+
+        high = float(candle[2])
+        low = float(candle[1])
+
+        if signal == "BUY":
+
+            hit_tp = high >= tp_price
+            hit_sl = low <= sl_price
+
+        else:
+
+            hit_tp = low <= tp_price
+            hit_sl = high >= sl_price
+
+        # If both are touched in the same candle,
+        # use conservative assumption: SL first.
+        if hit_tp and hit_sl:
+            return "SL"
+
+        if hit_tp:
+            return "TP"
+
+        if hit_sl:
+            return "SL"
+
+    return "TIMEOUT"
 
 
-def run_pattern_test(candles):
+def run_backtest(candles):
 
-    results = {
+    stats = {
         "BUY": {
-            "total": 0,
-            "up15": 0,
-            "up30": 0,
-            "up45": 0
+            "signals": 0,
+            "tp": 0,
+            "sl": 0,
+            "timeout": 0
         },
         "SELL": {
-            "total": 0,
-            "down15": 0,
-            "down30": 0,
-            "down45": 0
+            "signals": 0,
+            "tp": 0,
+            "sl": 0,
+            "timeout": 0
         }
     }
 
-    condition_stats = {}
+    patterns = {}
 
-    movement = {
-        "BUY": {15: [], 30: [], 45: []},
-        "SELL": {15: [], 30: [], 45: []}
-    }
+    print("🔎 Running corrected pattern + TP/SL test...")
 
-    print("🔎 Running 6-month pattern test...")
-
-    for i in range(LOOKBACK, len(candles) - 3):
+    for i in range(
+        LOOKBACK,
+        len(candles) - 12
+    ):
 
         history = candles[i - LOOKBACK:i]
 
@@ -266,142 +312,144 @@ def run_pattern_test(candles):
         if signal == "WAIT":
             continue
 
-        entry = float(candles[i][4])
+        result = check_trade(
+            candles,
+            i,
+            signal
+        )
 
-        results[signal]["total"] += 1
+        stats[signal]["signals"] += 1
 
-        condition_key = "|".join(
+        if result == "TP":
+            stats[signal]["tp"] += 1
+
+        elif result == "SL":
+            stats[signal]["sl"] += 1
+
+        else:
+            stats[signal]["timeout"] += 1
+
+        pattern = "|".join(
             sorted(analysis["conditions"])
         )
 
-        if condition_key not in condition_stats:
-            condition_stats[condition_key] = {
+        if pattern not in patterns:
+
+            patterns[pattern] = {
                 "signals": 0,
-                "up": 0,
-                "down": 0
+                "tp": 0,
+                "sl": 0,
+                "timeout": 0
             }
 
-        condition_stats[condition_key]["signals"] += 1
+        patterns[pattern]["signals"] += 1
 
-        for minutes in [15, 30, 45]:
+        if result == "TP":
+            patterns[pattern]["tp"] += 1
 
-            future_index = i + minutes // 15
+        elif result == "SL":
+            patterns[pattern]["sl"] += 1
 
-            future_price = float(
-                candles[future_index][4]
-            )
+        else:
+            patterns[pattern]["timeout"] += 1
 
-            move = percent_change(
-                entry,
-                future_price
-            )
-
-            movement[signal][minutes].append(move)
-
-            if move > 0:
-                condition_stats[condition_key]["up"] += 1
-
-            elif move < 0:
-                condition_stats[condition_key]["down"] += 1
-
-            if signal == "BUY":
-
-                if move > 0:
-                    results["BUY"][f"up{minutes}"] += 1
-
-            elif signal == "SELL":
-
-                if move < 0:
-                    results["SELL"][f"down{minutes}"] += 1
-
-    return results, condition_stats, movement
+    return stats, patterns
 
 
-def average(values):
-
-    if not values:
-        return 0
-
-    return sum(values) / len(values)
-
-
-def print_results(results, condition_stats, movement):
+def print_results(stats, patterns):
 
     print()
-    print("=" * 65)
-    print("📊 BTC 15M — 6 MONTH MARKET PATTERN TEST")
-    print("=" * 65)
+    print("=" * 70)
+    print("📊 BTC 15M — 6 MONTH CORRECTED TP/SL BACKTEST")
+    print("=" * 70)
+
+    print()
+    print(
+        f"🎯 Test settings: "
+        f"TP = {TP_PERCENT}% | "
+        f"SL = {SL_PERCENT}% | "
+        f"Max holding = 3 hours"
+    )
 
     for signal in ["BUY", "SELL"]:
 
+        data = stats[signal]
+
+        total = data["signals"]
+
+        tp_rate = (
+            data["tp"] / total * 100
+            if total else 0
+        )
+
+        sl_rate = (
+            data["sl"] / total * 100
+            if total else 0
+        )
+
+        timeout_rate = (
+            data["timeout"] / total * 100
+            if total else 0
+        )
+
         print()
-        print(f"📌 {signal} SIGNALS")
-        print("-" * 65)
+        print(f"📌 {signal}")
+        print("-" * 70)
 
-        total = results[signal]["total"]
-
-        print(f"Total signals: {total}")
-
-        for minutes in [15, 30, 45]:
-
-            if signal == "BUY":
-                successful = results["BUY"][f"up{minutes}"]
-            else:
-                successful = results["SELL"][f"down{minutes}"]
-
-            accuracy = (
-                successful / total * 100
-                if total else 0
-            )
-
-            avg_move = average(
-                movement[signal][minutes]
-            )
-
-            print(
-                f"{minutes}M → "
-                f"correct direction: "
-                f"{successful}/{total} "
-                f"({accuracy:.1f}%) | "
-                f"average move: {avg_move:.3f}%"
-            )
+        print(f"Signals: {total}")
+        print(
+            f"TP: {data['tp']} "
+            f"({tp_rate:.1f}%)"
+        )
+        print(
+            f"SL: {data['sl']} "
+            f"({sl_rate:.1f}%)"
+        )
+        print(
+            f"TIMEOUT: {data['timeout']} "
+            f"({timeout_rate:.1f}%)"
+        )
 
     print()
-    print("=" * 65)
-    print("🔎 MARKET CONDITION PATTERNS")
-    print("=" * 65)
+    print("=" * 70)
+    print("🔎 TOP MARKET PATTERNS")
+    print("=" * 70)
 
-    sorted_conditions = sorted(
-        condition_stats.items(),
+    sorted_patterns = sorted(
+        patterns.items(),
         key=lambda x: x[1]["signals"],
         reverse=True
     )
 
-    for conditions, data in sorted_conditions[:15]:
+    for pattern, data in sorted_patterns[:20]:
 
-        signals = data["signals"]
-        up = data["up"]
-        down = data["down"]
+        total = data["signals"]
 
-        up_percent = up / signals * 100
-        down_percent = down / signals * 100
+        tp_rate = data["tp"] / total * 100
+        sl_rate = data["sl"] / total * 100
+        timeout_rate = data["timeout"] / total * 100
 
         print()
-        print(f"Condition: {conditions}")
-        print(f"Signals: {signals}")
-        print(f"Price UP: {up_percent:.1f}%")
-        print(f"Price DOWN: {down_percent:.1f}%")
+        print(f"Pattern: {pattern}")
+        print(f"Signals: {total}")
+        print(f"TP first: {data['tp']} ({tp_rate:.1f}%)")
+        print(f"SL first: {data['sl']} ({sl_rate:.1f}%)")
+        print(
+            f"Timeout: "
+            f"{data['timeout']} "
+            f"({timeout_rate:.1f}%)"
+        )
 
     print()
-    print("=" * 65)
-    print("⚠️ This is historical analysis, not a future prediction.")
-    print("⚠️ Historical patterns do not guarantee future results.")
-    print("=" * 65)
+    print("=" * 70)
+    print("⚠️ Historical backtest only.")
+    print("⚠️ This does not guarantee future results.")
+    print("=" * 70)
 
 
 def main():
 
-    print("🚀 BTC 6-Month Pattern Backtest Started!")
+    print("🚀 BTC 6-Month Corrected Pattern Backtest Started!")
 
     candles = get_six_month_data()
 
@@ -410,14 +458,11 @@ def main():
             "Not enough historical data."
         )
 
-    results, conditions, movement = run_pattern_test(
-        candles
-    )
+    stats, patterns = run_backtest(candles)
 
     print_results(
-        results,
-        conditions,
-        movement
+        stats,
+        patterns
     )
 
 
