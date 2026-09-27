@@ -1,70 +1,77 @@
+
+import time
 import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
-# ============================================================
-# SETTINGS
-# ============================================================
+# ================= SETTINGS =================
 
 DAYS = 183
+TRAIN_DAYS = 122
 
-TRAIN_DAYS = 122       # প্রায় 4 মাস
-VALIDATION_DAYS = 61    # প্রায় 2 মাস
-
-GRANULARITY = 900       # 15 minutes
+GRANULARITY = 900
 CHUNK_CANDLES = 250
-
 LOOKBACK = 100
 
 ATR_TP = 1.5
 ATR_SL = 1.0
+MAX_HOLD = 12
 
-MAX_HOLD_CANDLES = 12  # 3 hours
-
+COOLDOWN = 12
 MIN_TRAIN_SIGNALS = 50
 
-COOLDOWN_CANDLES = 12  # একটি trade শেষ না হওয়া পর্যন্ত নতুন trade নয়
+# Estimated fee + slippage per side
+FEE_PER_SIDE = 0.0005
+SLIPPAGE_PER_SIDE = 0.0002
+ROUND_TRIP_COST = 2 * (FEE_PER_SIDE + SLIPPAGE_PER_SIDE)
 
-FEE_PER_SIDE = 0.0005      # 0.05%
-SLIPPAGE_PER_SIDE = 0.0002  # 0.02%
+BASE_URL = (
+    "https://api.exchange.coinbase.com/"
+    "products/BTC-USD/candles"
+)
 
-# ============================================================
-# DOWNLOAD BTC 15M DATA
-# ============================================================
+
+# ================= DOWNLOAD DATA =================
 
 def download_data():
+    print("BTC 6-Month Train + Validation Backtest")
+    print("Downloading BTC 15M candles...")
 
-    print("🚀 BTC 6-Month Train + Validation Backtest Started!")
-    print()
-    print("📥 Downloading 6 months of BTC 15M data...")
+    end_ts = int(
+        datetime.now(timezone.utc).timestamp() // GRANULARITY
+    ) * GRANULARITY
 
-    end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=DAYS)
-
+    start_ts = end_ts - DAYS * 86400
+    current = start_ts
     all_rows = []
 
-    current = start_time
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "BTC-15M-Backtest/1.0"
+    })
 
-    while current < end_time:
-
+    while current < end_ts:
         chunk_end = min(
-            current + timedelta(minutes=GRANULARITY * CHUNK_CANDLES),
-            end_time
+            current + GRANULARITY * CHUNK_CANDLES,
+            end_ts
         )
 
-        start_iso = current.isoformat()
-        end_iso = chunk_end.isoformat()
+        start_iso = datetime.fromtimestamp(
+            current, timezone.utc
+        ).isoformat(timespec="seconds")
+
+        end_iso = datetime.fromtimestamp(
+            chunk_end, timezone.utc
+        ).isoformat(timespec="seconds")
 
         print(
-            f"Downloading: "
-            f"{current.strftime('%Y-%m-%d')} "
-            f"to "
-            f"{chunk_end.strftime('%Y-%m-%d')}"
+            "Downloading:",
+            start_iso[:10],
+            "to",
+            end_iso[:10]
         )
-
-        url = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
 
         params = {
             "start": start_iso,
@@ -72,39 +79,59 @@ def download_data():
             "granularity": GRANULARITY
         }
 
-        try:
-            r = requests.get(url, params=params, timeout=30)
-            r.raise_for_status()
+        response = None
 
-            data = r.json()
+        for attempt in range(3):
+            try:
+                response = session.get(
+                    BASE_URL,
+                    params=params,
+                    timeout=30
+                )
+                response.raise_for_status()
+                break
+            except Exception as error:
+                print(
+                    f"Download attempt {attempt + 1} failed:",
+                    error
+                )
+                if attempt == 2:
+                    raise RuntimeError(
+                        "Could not download BTC data. "
+                        "Please run the workflow again later."
+                    )
+                time.sleep(2)
 
-            if isinstance(data, list):
-                all_rows.extend(data)
+        rows = response.json()
 
-        except Exception as e:
-            print("⚠️ Download error:", e)
+        if not isinstance(rows, list):
+            raise RuntimeError(
+                "Unexpected Coinbase API response."
+            )
 
+        all_rows.extend(rows)
+
+        # IMPORTANT: seconds, not minutes
         current = chunk_end
+        time.sleep(0.15)
 
     if not all_rows:
-        raise RuntimeError("❌ No BTC data downloaded.")
+        raise RuntimeError("No BTC data downloaded.")
 
     df = pd.DataFrame(
         all_rows,
         columns=[
-            "time",
-            "low",
-            "high",
-            "open",
-            "close",
-            "volume"
+            "time", "low", "high",
+            "open", "close", "volume"
         ]
     )
 
     df = df.drop_duplicates(subset=["time"])
     df = df.sort_values("time").reset_index(drop=True)
 
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df["time"] = pd.to_datetime(
+        df["time"], unit="s", utc=True
+    )
 
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -112,84 +139,93 @@ def download_data():
     df = df.dropna().reset_index(drop=True)
 
     print()
-    print(f"✅ Total candles: {len(df):,}")
-    print(
-        f"📅 From: {df['time'].iloc[0]}"
-        f"\n📅 To:   {df['time'].iloc[-1]}"
-    )
+    print(f"Total candles downloaded: {len(df):,}")
+    print(f"First candle: {df['time'].iloc[0]}")
+    print(f"Last candle:  {df['time'].iloc[-1]}")
     print()
 
     return df
 
 
-# ============================================================
-# INDICATORS
-# ============================================================
+# ================= INDICATORS =================
 
 def calculate_indicators(df):
-
     df = df.copy()
 
-    # EMA
-    df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
-    df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["ema9"] = df["close"].ewm(
+        span=9, adjust=False
+    ).mean()
 
-    # RSI
+    df["ema21"] = df["close"].ewm(
+        span=21, adjust=False
+    ).mean()
+
+    df["ema50"] = df["close"].ewm(
+        span=50, adjust=False
+    ).mean()
+
     delta = df["close"].diff()
 
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    avg_gain = gain.ewm(
+        alpha=1 / 14, adjust=False
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / 14, adjust=False
+    ).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
 
-    df["rsi"] = 100 - (100 / (1 + rs))
-    df["rsi"] = df["rsi"].fillna(50)
+    df["rsi"] = (
+        100 - 100 / (1 + rs)
+    ).fillna(50)
 
-    # MACD
-    ema12 = df["close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["close"].ewm(span=26, adjust=False).mean()
+    ema12 = df["close"].ewm(
+        span=12, adjust=False
+    ).mean()
+
+    ema26 = df["close"].ewm(
+        span=26, adjust=False
+    ).mean()
 
     df["macd"] = ema12 - ema26
-    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
 
-    # ATR
-    prev_close = df["close"].shift(1)
+    df["macd_signal"] = df["macd"].ewm(
+        span=9, adjust=False
+    ).mean()
 
-    tr1 = df["high"] - df["low"]
-    tr2 = (df["high"] - prev_close).abs()
-    tr3 = (df["low"] - prev_close).abs()
+    previous_close = df["close"].shift(1)
 
-    true_range = pd.concat(
-        [tr1, tr2, tr3],
-        axis=1
-    ).max(axis=1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - previous_close).abs(),
+        (df["low"] - previous_close).abs()
+    ], axis=1).max(axis=1)
 
-    df["atr"] = true_range.rolling(14).mean()
+    df["atr"] = tr.rolling(14).mean()
 
-    # Volume
     df["volume_avg"] = df["volume"].rolling(20).mean()
 
     df["volume_ratio"] = (
         df["volume"] /
         df["volume_avg"].replace(0, np.nan)
+    ).fillna(1)
+
+    # Use only candles before the current candle
+    previous_high = (
+        df["high"].shift(1).rolling(20).max()
     )
 
-    # Recent support / resistance
-    df["support"] = df["low"].rolling(20).min()
-    df["resistance"] = df["high"].rolling(20).max()
-
-    # Breakout
-    previous_high = df["high"].shift(1).rolling(20).max()
-    previous_low = df["low"].shift(1).rolling(20).min()
+    previous_low = (
+        df["low"].shift(1).rolling(20).min()
+    )
 
     df["breakout_up"] = df["close"] > previous_high
     df["breakout_down"] = df["close"] < previous_low
 
-    # Trend
     df["trend_up"] = (
         (df["ema9"] > df["ema21"]) &
         (df["ema21"] > df["ema50"])
@@ -203,137 +239,93 @@ def calculate_indicators(df):
     return df
 
 
-# ============================================================
-# CREATE MARKET PATTERN
-# ============================================================
+# ================= MARKET PATTERN =================
 
 def get_pattern(row):
-
-    # Trend
     if row["trend_up"]:
         trend = "TREND_UP"
-
     elif row["trend_down"]:
         trend = "TREND_DOWN"
-
     else:
         trend = "SIDEWAYS"
 
-
-    # RSI
     if row["rsi"] >= 60:
         rsi_state = "RSI_STRONG"
-
     elif row["rsi"] <= 40:
         rsi_state = "RSI_WEAK"
-
     else:
         rsi_state = "RSI_NEUTRAL"
 
+    macd_state = (
+        "MACD_UP"
+        if row["macd"] > row["macd_signal"]
+        else "MACD_DOWN"
+    )
 
-    # MACD
-    if row["macd"] > row["macd_signal"]:
-        macd_state = "MACD_UP"
-
-    else:
-        macd_state = "MACD_DOWN"
-
-
-    # Volume
     if row["volume_ratio"] >= 1.3:
         volume_state = "VOLUME_STRONG"
-
     elif row["volume_ratio"] <= 0.7:
         volume_state = "VOLUME_WEAK"
-
     else:
         volume_state = "VOLUME_NORMAL"
 
-
-    # Breakout
     if row["breakout_up"]:
         breakout = "BREAKOUT_UP"
-
     elif row["breakout_down"]:
         breakout = "BREAKOUT_DOWN"
-
     else:
         breakout = "NO_BREAKOUT"
 
-
     return (
-        f"{trend}|"
-        f"{rsi_state}|"
-        f"{macd_state}|"
-        f"{volume_state}|"
-        f"{breakout}"
+        f"{trend}|{rsi_state}|{macd_state}|"
+        f"{volume_state}|{breakout}"
     )
 
 
-# ============================================================
-# SIGNAL
-# ============================================================
+# ================= SIGNAL =================
 
 def get_signal(row):
-
     if pd.isna(row["atr"]) or row["atr"] <= 0:
-        return "WAIT"
-
-    if pd.isna(row["ema50"]):
         return "WAIT"
 
     buy_score = 0
     sell_score = 0
 
-    # EMA
     if row["ema9"] > row["ema21"]:
         buy_score += 2
-
     elif row["ema9"] < row["ema21"]:
         sell_score += 2
 
-    # Trend
     if row["trend_up"]:
         buy_score += 2
-
     elif row["trend_down"]:
         sell_score += 2
 
-    # RSI
     if 50 < row["rsi"] < 70:
         buy_score += 1
-
     elif 30 < row["rsi"] < 50:
         sell_score += 1
 
-    # MACD
     if row["macd"] > row["macd_signal"]:
         buy_score += 2
-
     elif row["macd"] < row["macd_signal"]:
         sell_score += 2
 
-    # Volume
     if row["volume_ratio"] >= 1.3:
-
         if buy_score > sell_score:
             buy_score += 1
-
         elif sell_score > buy_score:
             sell_score += 1
 
-    # Breakout
     if row["breakout_up"]:
         buy_score += 2
 
     if row["breakout_down"]:
         sell_score += 2
 
-    # Avoid sideways
     if not row["trend_up"] and not row["trend_down"]:
         return "WAIT"
 
-    # Signal
     if buy_score >= 6 and buy_score > sell_score:
         return "BUY"
 
@@ -343,275 +335,176 @@ def get_signal(row):
     return "WAIT"
 
 
-# ============================================================
-# TEST ONE TRADE
-# ============================================================
+# ================= TEST ONE TRADE =================
 
 def test_trade(df, index, signal):
+    row = df.iloc[index]
 
-    entry = df.iloc[index]
+    entry = float(row["close"])
+    atr = float(row["atr"])
 
-    entry_price = entry["close"]
-    atr = entry["atr"]
-
-    if pd.isna(atr) or atr <= 0:
+    if not np.isfinite(atr) or atr <= 0 or entry <= 0:
         return None
 
+    risk_fraction = ATR_SL * atr / entry
+
     if signal == "BUY":
-
-        tp = entry_price + (atr * ATR_TP)
-        sl = entry_price - (atr * ATR_SL)
-
+        tp = entry + ATR_TP * atr
+        sl = entry - ATR_SL * atr
     else:
+        tp = entry - ATR_TP * atr
+        sl = entry + ATR_SL * atr
 
-        tp = entry_price - (atr * ATR_TP)
-        sl = entry_price + (atr * ATR_SL)
+    last_index = min(index + MAX_HOLD, len(df) - 1)
 
-
-    end_index = min(
-        index + MAX_HOLD_CANDLES,
-        len(df) - 1
-    )
-
-
-    for j in range(index + 1, end_index + 1):
-
+    for j in range(index + 1, last_index + 1):
         candle = df.iloc[j]
 
-        high = candle["high"]
-        low = candle["low"]
-
         if signal == "BUY":
-
-            hit_tp = high >= tp
-            hit_sl = low <= sl
-
+            hit_tp = candle["high"] >= tp
+            hit_sl = candle["low"] <= sl
         else:
+            hit_tp = candle["low"] <= tp
+            hit_sl = candle["high"] >= sl
 
-            hit_tp = low <= tp
-            hit_sl = high >= sl
-
-
-        # If both happen inside same candle,
-        # assume SL first (conservative).
+        # Conservative: if both hit in one candle,
+        # count the stop-loss first.
         if hit_tp and hit_sl:
-
-            return {
-                "result": "SL",
-                "r": -1.0,
-                "exit_price": sl,
-                "exit_index": j
-            }
-
-        if hit_tp:
-
-            return {
-                "result": "TP",
-                "r": 1.5,
-                "exit_price": tp,
-                "exit_index": j
-            }
+            gross_return = -risk_fraction
+            result = "SL"
+            exit_index = j
+            break
 
         if hit_sl:
+            gross_return = -risk_fraction
+            result = "SL"
+            exit_index = j
+            break
 
-            return {
-                "result": "SL",
-                "r": -1.0,
-                "exit_price": sl,
-                "exit_index": j
-            }
-
-
-    # Timeout
-    exit_price = df.iloc[end_index]["close"]
-
-    if signal == "BUY":
-        raw_return = (exit_price - entry_price) / entry_price
+        if hit_tp:
+            gross_return = ATR_TP * atr / entry
+            result = "TP"
+            exit_index = j
+            break
     else:
-        raw_return = (entry_price - exit_price) / entry_price
+        exit_index = last_index
+        exit_price = float(df.iloc[exit_index]["close"])
 
+        if signal == "BUY":
+            gross_return = (exit_price - entry) / entry
+        else:
+            gross_return = (entry - exit_price) / entry
 
-    # Approximate trading costs
-    cost = (FEE_PER_SIDE + SLIPPAGE_PER_SIDE) * 2
+        result = "TIMEOUT"
 
-    net_return = raw_return - cost
-
-    r_value = net_return / (ATR_SL * atr / entry_price)
+    net_return = gross_return - ROUND_TRIP_COST
+    net_r = net_return / risk_fraction
 
     return {
-        "result": "TIMEOUT",
-        "r": r_value,
-        "exit_price": exit_price,
-        "exit_index": end_index
+        "result": result,
+        "r": net_r,
+        "exit_index": exit_index
     }
 
 
-# ============================================================
-# TRAINING
-# ============================================================
+# ================= TRAINING =================
 
-def training_phase(df, train_start, train_end):
+def training_phase(df, start, end):
+    print("=" * 65)
+    print("TRAINING: First approximately 4 months")
+    print("=" * 65)
 
-    print("=" * 70)
-    print("🧠 TRAINING PHASE")
-    print("=" * 70)
+    stats = defaultdict(lambda: {
+        "signals": 0,
+        "tp": 0,
+        "sl": 0,
+        "timeout": 0,
+        "total_r": 0.0
+    })
 
-    pattern_stats = defaultdict(
-        lambda: {
-            "signals": 0,
-            "tp": 0,
-            "sl": 0,
-            "timeout": 0,
-            "r_total": 0.0
-        }
-    )
+    last_exit = -999999
 
-    last_trade_index = {
-        "BUY": -999999,
-        "SELL": -999999
-    }
-
-
-    for i in range(
-        max(LOOKBACK, train_start),
-        train_end
-    ):
-
+    for i in range(max(LOOKBACK, start), end):
         row = df.iloc[i]
-
         signal = get_signal(row)
 
         if signal == "WAIT":
             continue
 
-        # Cooldown
-        if i - last_trade_index[signal] < COOLDOWN_CANDLES:
+        # One position at a time, then cooldown
+        if i - last_exit <= COOLDOWN:
             continue
 
-        result = test_trade(
-            df,
-            i,
-            signal
-        )
+        trade = test_trade(df, i, signal)
 
-        if result is None:
+        if trade is None:
             continue
 
-        pattern = get_pattern(row)
+        key = (signal, get_pattern(row))
+        s = stats[key]
 
-        stats = pattern_stats[
-            (signal, pattern)
-        ]
+        s["signals"] += 1
+        s[trade["result"].lower()] += 1
+        s["total_r"] += trade["r"]
 
-        stats["signals"] += 1
+        last_exit = trade["exit_index"]
 
-        stats[result["result"].lower()] += 1
-
-        stats["r_total"] += result["r"]
-
-        last_trade_index[signal] = result["exit_index"]
-
-
-    # Select patterns
     selected = {}
 
-    print()
-    print("📊 TRAINING PATTERNS")
-    print()
+    print("\nPatterns passing training filter:\n")
 
-    for key, stats in pattern_stats.items():
-
-        signal, pattern = key
-
-        n = stats["signals"]
+    for key, s in stats.items():
+        n = s["signals"]
 
         if n < MIN_TRAIN_SIGNALS:
             continue
 
-        tp_rate = stats["tp"] / n
-        sl_rate = stats["sl"] / n
-        avg_r = stats["r_total"] / n
+        avg_r = s["total_r"] / n
 
-        # Require positive average R
         if avg_r > 0:
-
             selected[key] = {
                 "signals": n,
-                "tp_rate": tp_rate,
-                "sl_rate": sl_rate,
-                "avg_r": avg_r
+                "avg_r": avg_r,
+                "tp_rate": s["tp"] / n * 100,
+                "sl_rate": s["sl"] / n * 100
             }
 
+            signal, pattern = key
+
             print(
-                f"{signal:4} | "
-                f"{n:4} signals | "
-                f"TP {tp_rate*100:5.1f}% | "
-                f"SL {sl_rate*100:5.1f}% | "
-                f"Avg R {avg_r:+.3f} | "
-                f"{pattern}"
+                f"{signal} | n={n} | "
+                f"TP={s['tp']/n*100:.1f}% | "
+                f"SL={s['sl']/n*100:.1f}% | "
+                f"Avg R={avg_r:+.3f} | {pattern}"
             )
 
-
-    print()
-    print(
-        f"✅ Selected training patterns: "
-        f"{len(selected)}"
-    )
-
-    if not selected:
-        print(
-            "⚠️ No pattern passed the training filter."
-        )
-
-    print()
+    print(f"\nSelected patterns: {len(selected)}\n")
 
     return selected
 
 
-# ============================================================
-# VALIDATION
-# ============================================================
+# ================= VALIDATION =================
 
-def validation_phase(df, validation_start, validation_end, selected):
+def validation_phase(df, start, end, selected):
+    print("=" * 65)
+    print("VALIDATION: Last approximately 2 months")
+    print("=" * 65)
 
-    print("=" * 70)
-    print("🧪 VALIDATION PHASE")
-    print("=" * 70)
-
-    results = {
+    stats = {
         "BUY": {
-            "signals": 0,
-            "tp": 0,
-            "sl": 0,
-            "timeout": 0,
-            "r": 0.0
+            "signals": 0, "tp": 0, "sl": 0,
+            "timeout": 0, "total_r": 0.0
         },
         "SELL": {
-            "signals": 0,
-            "tp": 0,
-            "sl": 0,
-            "timeout": 0,
-            "r": 0.0
+            "signals": 0, "tp": 0, "sl": 0,
+            "timeout": 0, "total_r": 0.0
         }
     }
 
+    last_exit = -999999
 
-    last_trade_index = {
-        "BUY": -999999,
-        "SELL": -999999
-    }
-
-
-    trades = []
-
-
-    for i in range(
-        max(LOOKBACK, validation_start),
-        validation_end
-    ):
-
+    for i in range(max(LOOKBACK, start), end):
         row = df.iloc[i]
-
         signal = get_signal(row)
 
         if signal == "WAIT":
@@ -619,260 +512,117 @@ def validation_phase(df, validation_start, validation_end, selected):
 
         pattern = get_pattern(row)
 
-        key = (signal, pattern)
-
-        # ONLY patterns learned during training
-        if key not in selected:
+        # Only use patterns selected from training data
+        if (signal, pattern) not in selected:
             continue
 
-        if i - last_trade_index[signal] < COOLDOWN_CANDLES:
+        if i - last_exit <= COOLDOWN:
             continue
 
-        result = test_trade(
-            df,
-            i,
-            signal
-        )
+        trade = test_trade(df, i, signal)
 
-        if result is None:
+        if trade is None:
             continue
 
-        results[signal]["signals"] += 1
+        s = stats[signal]
+        s["signals"] += 1
+        s[trade["result"].lower()] += 1
+        s["total_r"] += trade["r"]
 
-        results[signal][
-            result["result"].lower()
-        ] += 1
+        last_exit = trade["exit_index"]
 
-        results[signal]["r"] += result["r"]
-
-        trades.append({
-            "time": row["time"],
-            "signal": signal,
-            "pattern": pattern,
-            "result": result["result"],
-            "r": result["r"]
-        })
-
-        last_trade_index[signal] = result["exit_index"]
-
+    total_trades = 0
+    total_r = 0.0
 
     print()
-
-    total_r = 0.0
-    total_trades = 0
 
     for signal in ["BUY", "SELL"]:
-
-        s = results[signal]
-
+        s = stats[signal]
         n = s["signals"]
 
-        total_r += s["r"]
         total_trades += n
+        total_r += s["total_r"]
 
-        if n > 0:
-
-            tp_rate = s["tp"] / n * 100
-            sl_rate = s["sl"] / n * 100
-            timeout_rate = s["timeout"] / n * 100
-            avg_r = s["r"] / n
-
+        if n:
+            tp_pct = s["tp"] / n * 100
+            sl_pct = s["sl"] / n * 100
+            timeout_pct = s["timeout"] / n * 100
+            avg_r = s["total_r"] / n
         else:
-
-            tp_rate = 0
-            sl_rate = 0
-            timeout_rate = 0
-            avg_r = 0
-
+            tp_pct = sl_pct = timeout_pct = avg_r = 0
 
         print(
-            f"{signal}: "
-            f"{n} trades | "
-            f"TP {s['tp']} ({tp_rate:.1f}%) | "
-            f"SL {s['sl']} ({sl_rate:.1f}%) | "
-            f"Timeout {s['timeout']} ({timeout_rate:.1f}%) | "
-            f"Total R {s['r']:+.2f} | "
-            f"Avg R {avg_r:+.3f}"
+            f"{signal}: {n} trades | "
+            f"TP {s['tp']} ({tp_pct:.1f}%) | "
+            f"SL {s['sl']} ({sl_pct:.1f}%) | "
+            f"Timeout {s['timeout']} ({timeout_pct:.1f}%) | "
+            f"Total R {s['total_r']:+.2f} | "
+            f"Average R {avg_r:+.3f}"
         )
 
+    print("\n" + "-" * 65)
+    print(f"VALIDATION TOTAL TRADES: {total_trades}")
+    print(f"VALIDATION TOTAL R: {total_r:+.2f}")
 
-    print()
-    print("-" * 70)
-
-    print(
-        f"📌 VALIDATION TOTAL: "
-        f"{total_trades} trades"
-    )
-
-    print(
-        f"📈 Total R: "
-        f"{total_r:+.2f}"
-    )
-
-    if total_trades > 0:
-
-        print(
-            f"📊 Average R/trade: "
-            f"{total_r / total_trades:+.3f}"
-        )
+    if total_trades:
+        print(f"AVERAGE R PER TRADE: {total_r / total_trades:+.3f}")
 
     print()
 
-    return results, trades
+    return total_trades, total_r
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# ================= MAIN =================
 
 def main():
-
     df = download_data()
-
     df = calculate_indicators(df)
 
     total = len(df)
 
-    # Use chronological split
-    train_start = LOOKBACK
+    if total < 500:
+        raise RuntimeError(
+            f"Not enough candles downloaded: {total}"
+        )
 
-    train_end = int(
-        total * (TRAIN_DAYS / DAYS)
-    )
-
+    # Chronological split: approximately 4 months / 2 months
+    train_end = int(total * TRAIN_DAYS / DAYS)
     validation_start = train_end
 
-    validation_end = total
-
-    print("=" * 70)
-
+    print(f"Total candles: {total:,}")
+    print(f"Training range: 0 to {train_end:,}")
     print(
-        f"🧠 Training candles: "
-        f"{train_start:,} → {train_end:,}"
+        f"Validation range: {validation_start:,} "
+        f"to {total:,}"
     )
-
-    print(
-        f"🧪 Validation candles: "
-        f"{validation_start:,} → {validation_end:,}"
-    )
-
+    print(f"TP: {ATR_TP} x ATR")
+    print(f"SL: {ATR_SL} x ATR")
+    print(f"Maximum holding: {MAX_HOLD * 15} minutes")
+    print(f"Round-trip estimated cost: {ROUND_TRIP_COST*100:.2f}%")
     print()
-
-    print(
-        f"🎯 TP = {ATR_TP} × ATR"
-    )
-
-    print(
-        f"🛑 SL = {ATR_SL} × ATR"
-    )
-
-    print(
-        f"⏱️ Max holding = "
-        f"{MAX_HOLD_CANDLES * 15 / 60:.1f} hours"
-    )
-
-    print(
-        f"🔒 Minimum training signals/pattern = "
-        f"{MIN_TRAIN_SIGNALS}"
-    )
-
-    print(
-        f"⏳ Cooldown = "
-        f"{COOLDOWN_CANDLES * 15} minutes"
-    )
-
-    print()
-
-
-    # -----------------------------
-    # TRAIN
-    # -----------------------------
 
     selected = training_phase(
-        df,
-        train_start,
-        train_end
+        df, LOOKBACK, train_end
     )
 
-
-    # -----------------------------
-    # VALIDATE
-    # -----------------------------
-
-    results, trades = validation_phase(
-        df,
-        validation_start,
-        validation_end,
-        selected
+    total_trades, total_r = validation_phase(
+        df, validation_start, total, selected
     )
 
-
-    # -----------------------------
-    # FINAL VERDICT
-    # -----------------------------
-
-    print("=" * 70)
-    print("🏁 FINAL VALIDATION RESULT")
-    print("=" * 70)
-
-    total_r = sum(
-        results[s]["r"]
-        for s in ["BUY", "SELL"]
-    )
-
-    total_trades = sum(
-        results[s]["signals"]
-        for s in ["BUY", "SELL"]
-    )
+    print("=" * 65)
+    print("FINAL VALIDATION RESULT")
+    print("=" * 65)
 
     if total_trades == 0:
-
-        print(
-            "⚠️ No validation trades."
-        )
-
-        print(
-            "The training filter was too strict."
-        )
-
+        print("No validation trades passed the training filter.")
     elif total_r > 0:
-
-        print(
-            "🟢 Validation Total R is POSITIVE."
-        )
-
-        print(
-            f"Total R = {total_r:+.2f}"
-        )
-
-        print(
-            "This does NOT automatically mean "
-            "the strategy is profitable live."
-        )
-
-        print(
-            "Fees, slippage and live execution "
-            "still matter."
-        )
-
+        print("Validation total R is positive.")
+        print("This is historical evidence, not a guarantee of profit.")
     else:
+        print("Validation total R is not positive.")
+        print("Do not switch the live bot to this strategy yet.")
 
-        print(
-            "🔴 Validation Total R is NEGATIVE."
-        )
-
-        print(
-            f"Total R = {total_r:+.2f}"
-        )
-
-        print(
-            "Do NOT change the live bot to this "
-            "strategy yet."
-        )
-
-    print()
-
-    print("✅ Backtest finished.")
+    print("Backtest finished.")
 
 
 if __name__ == "__main__":
