@@ -16,8 +16,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install requests
-        run: pip install requests
+      - name: Install dependencies
+        run: pip install requests pandas numpy
 
       - name: Run 6 month backtest
         run: python backtest_6month.py
