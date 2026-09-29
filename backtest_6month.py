@@ -19,16 +19,14 @@ DAYS = 183
 TP_ATR = 1.5
 SL_ATR = 1.0
 
-MAX_HOLD_CANDLES = 12      # 12 x 15m = 180 minutes
+MAX_HOLD_CANDLES = 12      # 180 minutes
 
 ROUND_TRIP_COST = 0.0014   # 0.14%
 
-COOLDOWN_CANDLES = 12      # 180 minutes
+COOLDOWN_CANDLES = 12
 
 TRAIN_DAYS = 60
 VALIDATION_DAYS = 30
-
-MIN_TRAIN_TRADES = 20
 
 
 # ============================================================
@@ -46,27 +44,14 @@ def download_data():
 
     current = start_time
 
+    chunk_minutes = 15 * CHUNK_CANDLES
+
     while current < end_time:
 
         chunk_end = min(
-            current + timedelta(minutes=GRANULARITY / 60 * CHUNK_CANDLES),
+            current + timedelta(minutes=chunk_minutes),
             end_time
         )
-
-        start_ts = int(current.timestamp())
-        end_ts = int(chunk_end.timestamp())
-
-        url = f"https://api.exchange.coinbase.com/products/{PRODUCT}/candles"
-
-        params = {
-            "granularity": GRANULARITY,
-            "start": datetime.fromtimestamp(
-                start_ts, timezone.utc
-            ).isoformat(),
-            "end": datetime.fromtimestamp(
-                end_ts, timezone.utc
-            ).isoformat()
-        }
 
         print(
             "Downloading:",
@@ -74,6 +59,17 @@ def download_data():
             "to",
             chunk_end.strftime("%Y-%m-%d %H:%M")
         )
+
+        url = (
+            "https://api.exchange.coinbase.com/"
+            "products/BTC-USD/candles"
+        )
+
+        params = {
+            "granularity": GRANULARITY,
+            "start": current.isoformat(),
+            "end": chunk_end.isoformat()
+        }
 
         try:
 
@@ -88,7 +84,6 @@ def download_data():
             data = response.json()
 
             if isinstance(data, list):
-
                 all_rows.extend(data)
 
         except Exception as e:
@@ -102,8 +97,9 @@ def download_data():
         time.sleep(0.25)
 
     if not all_rows:
-
-        raise RuntimeError("No market data downloaded.")
+        raise RuntimeError(
+            "No market data downloaded."
+        )
 
     df = pd.DataFrame(
         all_rows,
@@ -117,11 +113,13 @@ def download_data():
         ]
     )
 
+    # IMPORTANT:
+    # Force exact same datetime dtype.
     df["time"] = pd.to_datetime(
         df["time"],
         unit="s",
         utc=True
-    )
+    ).astype("datetime64[ns, UTC]")
 
     numeric_cols = [
         "low",
@@ -132,6 +130,7 @@ def download_data():
     ]
 
     for col in numeric_cols:
+
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce"
@@ -140,30 +139,42 @@ def download_data():
     df = (
         df
         .dropna()
-        .drop_duplicates(subset=["time"])
+        .drop_duplicates(
+            subset=["time"]
+        )
         .sort_values("time")
         .reset_index(drop=True)
     )
 
     print("\n✅ Data download complete.")
-    print("Total candles:", len(df))
-    print("First candle:", df["time"].iloc[0])
-    print("Last candle: ", df["time"].iloc[-1])
+
+    print(
+        "Total candles:",
+        len(df)
+    )
+
+    print(
+        "First candle:",
+        df["time"].iloc[0]
+    )
+
+    print(
+        "Last candle: ",
+        df["time"].iloc[-1]
+    )
 
     return df
 
 
 # ============================================================
-# INDICATORS
+# 15M INDICATORS
 # ============================================================
 
 def add_indicators(df):
 
     df = df.copy()
 
-    # ----------------------------
-    # 15M EMA
-    # ----------------------------
+    # EMA
 
     df["ema9"] = df["close"].ewm(
         span=9,
@@ -180,14 +191,17 @@ def add_indicators(df):
         adjust=False
     ).mean()
 
-    # ----------------------------
     # RSI
-    # ----------------------------
 
     delta = df["close"].diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.clip(
+        lower=0
+    )
+
+    loss = -delta.clip(
+        upper=0
+    )
 
     avg_gain = gain.ewm(
         alpha=1 / 14,
@@ -199,15 +213,20 @@ def add_indicators(df):
         adjust=False
     ).mean()
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-
-    df["rsi"] = 100 - (
-        100 / (1 + rs)
+    rs = (
+        avg_gain /
+        avg_loss.replace(
+            0,
+            np.nan
+        )
     )
 
-    # ----------------------------
+    df["rsi"] = (
+        100 -
+        (100 / (1 + rs))
+    )
+
     # MACD
-    # ----------------------------
 
     ema12 = df["close"].ewm(
         span=12,
@@ -219,25 +238,30 @@ def add_indicators(df):
         adjust=False
     ).mean()
 
-    df["macd"] = ema12 - ema26
+    df["macd"] = (
+        ema12 - ema26
+    )
 
-    df["macd_signal"] = df["macd"].ewm(
-        span=9,
-        adjust=False
-    ).mean()
+    df["macd_signal"] = (
+        df["macd"].ewm(
+            span=9,
+            adjust=False
+        ).mean()
+    )
 
     df["macd_hist"] = (
         df["macd"] -
         df["macd_signal"]
     )
 
-    # ----------------------------
     # ATR
-    # ----------------------------
 
     prev_close = df["close"].shift(1)
 
-    tr1 = df["high"] - df["low"]
+    tr1 = (
+        df["high"] -
+        df["low"]
+    )
 
     tr2 = (
         df["high"] -
@@ -254,11 +278,11 @@ def add_indicators(df):
         axis=1
     ).max(axis=1)
 
-    df["atr"] = tr.rolling(14).mean()
+    df["atr"] = (
+        tr.rolling(14).mean()
+    )
 
-    # ----------------------------
     # Volume
-    # ----------------------------
 
     df["volume_ma20"] = (
         df["volume"]
@@ -271,9 +295,7 @@ def add_indicators(df):
         df["volume_ma20"]
     )
 
-    # ----------------------------
-    # Candle properties
-    # ----------------------------
+    # Candle
 
     df["body"] = (
         df["close"] -
@@ -287,63 +309,106 @@ def add_indicators(df):
 
     df["body_ratio"] = (
         df["body"] /
-        df["range"].replace(0, np.nan)
+        df["range"].replace(
+            0,
+            np.nan
+        )
     )
 
     return df
 
 
 # ============================================================
-# BUILD 1H DATA FROM COMPLETED 15M CANDLES
+# BUILD COMPLETED 1H CANDLES
 # ============================================================
 
 def build_1h_data(df):
 
-    temp = df.set_index("time")
+    temp = df.copy()
 
-    h1 = temp.resample(
-        "1h",
-        label="left",
-        closed="left"
-    ).agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum"
-    })
+    temp["time"] = pd.to_datetime(
+        temp["time"],
+        utc=True
+    ).astype(
+        "datetime64[ns, UTC]"
+    )
 
-    h1 = h1.dropna().reset_index()
+    temp = temp.set_index(
+        "time"
+    )
 
-    # 1H candle beginning at 10:00 is only known
-    # after 11:00.
+    h1 = (
+        temp
+        .resample(
+            "1h",
+            label="left",
+            closed="left"
+        )
+        .agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum"
+        })
+        .dropna()
+        .reset_index()
+    )
+
+    # A 1H candle becomes known only after
+    # that hour has completed.
+
     h1["available_time"] = (
         h1["time"] +
         pd.Timedelta(hours=1)
     )
 
-    # 1H indicators
+    h1["available_time"] = pd.to_datetime(
+        h1["available_time"],
+        utc=True
+    ).astype(
+        "datetime64[ns, UTC]"
+    )
 
-    h1["ema20"] = h1["close"].ewm(
-        span=20,
-        adjust=False
-    ).mean()
+    # 1H EMA
 
-    h1["ema50"] = h1["close"].ewm(
-        span=50,
-        adjust=False
-    ).mean()
+    h1["ema20"] = (
+        h1["close"]
+        .ewm(
+            span=20,
+            adjust=False
+        )
+        .mean()
+    )
 
-    h1["ema100"] = h1["close"].ewm(
-        span=100,
-        adjust=False
-    ).mean()
+    h1["ema50"] = (
+        h1["close"]
+        .ewm(
+            span=50,
+            adjust=False
+        )
+        .mean()
+    )
+
+    h1["ema100"] = (
+        h1["close"]
+        .ewm(
+            span=100,
+            adjust=False
+        )
+        .mean()
+    )
 
     # 1H ATR
 
-    prev_close = h1["close"].shift(1)
+    prev_close = (
+        h1["close"].shift(1)
+    )
 
-    tr1 = h1["high"] - h1["low"]
+    tr1 = (
+        h1["high"] -
+        h1["low"]
+    )
 
     tr2 = (
         h1["high"] -
@@ -360,7 +425,9 @@ def build_1h_data(df):
         axis=1
     ).max(axis=1)
 
-    h1["atr"] = tr.rolling(14).mean()
+    h1["atr"] = (
+        tr.rolling(14).mean()
+    )
 
     # Trend slope
 
@@ -378,16 +445,44 @@ def build_1h_data(df):
 
 
 # ============================================================
-# MERGE COMPLETED 1H DATA INTO 15M
+# MERGE 1H + 15M
 # ============================================================
 
 def merge_timeframes(df, h1):
 
-    df = df.sort_values("time").copy()
+    df = df.copy()
+    h1 = h1.copy()
 
-    h1 = h1.sort_values(
-        "available_time"
-    ).copy()
+    # --------------------------------------------------------
+    # IMPORTANT FIX:
+    # Force BOTH merge columns to exactly the same dtype.
+    # --------------------------------------------------------
+
+    df["time"] = pd.to_datetime(
+        df["time"],
+        utc=True
+    ).astype(
+        "datetime64[ns, UTC]"
+    )
+
+    h1["available_time"] = pd.to_datetime(
+        h1["available_time"],
+        utc=True
+    ).astype(
+        "datetime64[ns, UTC]"
+    )
+
+    df = (
+        df
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+
+    h1 = (
+        h1
+        .sort_values("available_time")
+        .reset_index(drop=True)
+    )
 
     h1_cols = [
         "available_time",
@@ -400,16 +495,40 @@ def merge_timeframes(df, h1):
         "ema50_slope"
     ]
 
-    h1 = h1[h1_cols].rename(
+    h1 = h1[h1_cols].copy()
+
+    h1 = h1.rename(
         columns={
             "close": "h1_close",
             "ema20": "h1_ema20",
             "ema50": "h1_ema50",
             "ema100": "h1_ema100",
             "atr": "h1_atr",
-            "ema20_slope": "h1_ema20_slope",
-            "ema50_slope": "h1_ema50_slope"
+            "ema20_slope":
+                "h1_ema20_slope",
+            "ema50_slope":
+                "h1_ema50_slope"
         }
+    )
+
+    # Final dtype safety check
+
+    df["time"] = (
+        pd.to_datetime(
+            df["time"],
+            utc=True
+        )
+        .dt.tz_convert("UTC")
+        .astype("datetime64[ns, UTC]")
+    )
+
+    h1["available_time"] = (
+        pd.to_datetime(
+            h1["available_time"],
+            utc=True
+        )
+        .dt.tz_convert("UTC")
+        .astype("datetime64[ns, UTC]")
     )
 
     merged = pd.merge_asof(
@@ -424,7 +543,7 @@ def merge_timeframes(df, h1):
 
 
 # ============================================================
-# 1H MARKET REGIME
+# 1H REGIME
 # ============================================================
 
 def get_1h_regime(row):
@@ -438,18 +557,24 @@ def get_1h_regime(row):
         row["h1_ema50_slope"]
     ]
 
-    if any(pd.isna(x) for x in values):
+    if any(
+        pd.isna(x)
+        for x in values
+    ):
 
         return "UNKNOWN"
 
-    # Strong bullish environment
+    # Strong bullish
 
     if (
-        row["h1_close"] > row["h1_ema20"]
+        row["h1_close"] >
+        row["h1_ema20"]
         and
-        row["h1_ema20"] > row["h1_ema50"]
+        row["h1_ema20"] >
+        row["h1_ema50"]
         and
-        row["h1_ema50"] > row["h1_ema100"]
+        row["h1_ema50"] >
+        row["h1_ema100"]
         and
         row["h1_ema20_slope"] > 0
         and
@@ -458,14 +583,17 @@ def get_1h_regime(row):
 
         return "STRONG_UP"
 
-    # Strong bearish environment
+    # Strong bearish
 
     if (
-        row["h1_close"] < row["h1_ema20"]
+        row["h1_close"] <
+        row["h1_ema20"]
         and
-        row["h1_ema20"] < row["h1_ema50"]
+        row["h1_ema20"] <
+        row["h1_ema50"]
         and
-        row["h1_ema50"] < row["h1_ema100"]
+        row["h1_ema50"] <
+        row["h1_ema100"]
         and
         row["h1_ema20_slope"] < 0
         and
@@ -477,9 +605,11 @@ def get_1h_regime(row):
     # Normal bullish
 
     if (
-        row["h1_close"] > row["h1_ema50"]
+        row["h1_close"] >
+        row["h1_ema50"]
         and
-        row["h1_ema20"] > row["h1_ema50"]
+        row["h1_ema20"] >
+        row["h1_ema50"]
     ):
 
         return "NORMAL_UP"
@@ -487,9 +617,11 @@ def get_1h_regime(row):
     # Normal bearish
 
     if (
-        row["h1_close"] < row["h1_ema50"]
+        row["h1_close"] <
+        row["h1_ema50"]
         and
-        row["h1_ema20"] < row["h1_ema50"]
+        row["h1_ema20"] <
+        row["h1_ema50"]
     ):
 
         return "NORMAL_DOWN"
@@ -498,31 +630,27 @@ def get_1h_regime(row):
 
 
 # ============================================================
-# 15M ENTRY SIGNAL
+# 15M SIGNAL
 # ============================================================
 
 def get_signal(row):
 
     regime = get_1h_regime(row)
 
-    # ------------------------------------
+    # ========================================================
     # BUY
-    # ------------------------------------
+    # ========================================================
 
     if regime in [
         "STRONG_UP",
         "NORMAL_UP"
     ]:
 
-        # 15M trend alignment
-
         trend_ok = (
             row["ema9"] >
             row["ema21"] >
             row["ema50"]
         )
-
-        # Price pulled back toward EMA21
 
         pullback_distance = abs(
             row["close"] -
@@ -534,16 +662,12 @@ def get_signal(row):
             0.9 * row["atr"]
         )
 
-        # Bullish candle
-
         bullish_candle = (
             row["close"] >
             row["open"]
             and
             row["body_ratio"] >= 0.30
         )
-
-        # Momentum
 
         momentum_ok = (
             row["macd_hist"] > 0
@@ -553,13 +677,9 @@ def get_signal(row):
             row["rsi"] <= 68
         )
 
-        # Volume
-
         volume_ok = (
             row["volume_ratio"] >= 0.85
         )
-
-        # Avoid overextended entry
 
         not_extended = (
             abs(
@@ -581,9 +701,9 @@ def get_signal(row):
 
             return "BUY", regime
 
-    # ------------------------------------
+    # ========================================================
     # SELL
-    # ------------------------------------
+    # ========================================================
 
     if regime in [
         "STRONG_DOWN",
@@ -636,11 +756,16 @@ def get_signal(row):
 
         if (
             trend_ok
-            and pullback_ok
-            and bearish_candle
-            and momentum_ok
-            and volume_ok
-            and not_extended
+            and
+            pullback_ok
+            and
+            bearish_candle
+            and
+            momentum_ok
+            and
+            volume_ok
+            and
+            not_extended
         ):
 
             return "SELL", regime
@@ -649,51 +774,68 @@ def get_signal(row):
 
 
 # ============================================================
-# SIMULATE ONE TRADE
+# SIMULATE TRADE
 # ============================================================
 
-def simulate_trade(df, index, direction):
+def simulate_trade(
+    df,
+    index,
+    direction
+):
 
     row = df.iloc[index]
 
     entry = row["close"]
     atr = row["atr"]
 
-    if pd.isna(atr) or atr <= 0:
+    if (
+        pd.isna(atr)
+        or
+        atr <= 0
+    ):
 
         return None
 
     if direction == "BUY":
 
-        tp = entry + (
+        tp = (
+            entry +
             TP_ATR * atr
         )
 
-        sl = entry - (
+        sl = (
+            entry -
             SL_ATR * atr
         )
 
     else:
 
-        tp = entry - (
+        tp = (
+            entry -
             TP_ATR * atr
         )
 
-        sl = entry + (
+        sl = (
+            entry +
             SL_ATR * atr
         )
 
     end_index = min(
-        index + MAX_HOLD_CANDLES,
+        index +
+        MAX_HOLD_CANDLES,
         len(df) - 1
     )
 
+    result = "TIMEOUT"
+
+    exit_price = (
+        df.iloc[end_index]["close"]
+    )
+
+    exit_index = end_index
+
     max_favorable = 0.0
     max_adverse = 0.0
-
-    result = "TIMEOUT"
-    exit_price = df.iloc[end_index]["close"]
-    exit_index = end_index
 
     for j in range(
         index + 1,
@@ -762,9 +904,8 @@ def simulate_trade(df, index, direction):
                 candle["high"] >= sl
             )
 
-        # Conservative:
-        # if TP and SL occur in same candle,
-        # count SL first.
+        # Conservative assumption:
+        # SL first if both happen in same candle.
 
         if hit_sl:
 
@@ -784,9 +925,7 @@ def simulate_trade(df, index, direction):
 
             break
 
-    # ------------------------------------
-    # Return calculation
-    # ------------------------------------
+    # Return
 
     if direction == "BUY":
 
@@ -806,8 +945,6 @@ def simulate_trade(df, index, direction):
         gross_return -
         ROUND_TRIP_COST
     )
-
-    # R uses SL distance
 
     sl_distance = (
         SL_ATR * atr
@@ -834,12 +971,12 @@ def simulate_trade(df, index, direction):
         "net_return": net_return,
         "r": r_multiple,
         "mfe": max_favorable,
-        "mae": max_adverse,
+        "mae": max_adverse
     }
 
 
 # ============================================================
-# RUN TRADES
+# RUN BACKTEST
 # ============================================================
 
 def run_backtest(
@@ -850,7 +987,9 @@ def run_backtest(
 
     trades = []
 
-    next_allowed_index = start_index
+    next_allowed_index = (
+        start_index
+    )
 
     for i in range(
         start_index,
@@ -865,7 +1004,9 @@ def run_backtest(
         if pd.isna(row["atr"]):
             continue
 
-        signal, regime = get_signal(row)
+        signal, regime = (
+            get_signal(row)
+        )
 
         if signal == "WAIT":
             continue
@@ -879,12 +1020,13 @@ def run_backtest(
         if trade is None:
             continue
 
-        trade["time"] = row["time"]
+        trade["time"] = (
+            row["time"]
+        )
+
         trade["regime"] = regime
 
         trades.append(trade)
-
-        # Prevent overlapping trades
 
         next_allowed_index = (
             trade["exit_index"] +
@@ -895,7 +1037,7 @@ def run_backtest(
 
 
 # ============================================================
-# STATISTICS
+# PRINT STATS
 # ============================================================
 
 def print_stats(
@@ -912,32 +1054,49 @@ def print_stats(
         print("No trades.")
         return
 
-    df = pd.DataFrame(trades)
+    result_df = pd.DataFrame(
+        trades
+    )
 
-    total = len(df)
+    total = len(result_df)
 
     tp = (
-        df["result"] == "TP"
+        result_df["result"] ==
+        "TP"
     ).sum()
 
     sl = (
-        df["result"] == "SL"
+        result_df["result"] ==
+        "SL"
     ).sum()
 
     timeout = (
-        df["result"] == "TIMEOUT"
+        result_df["result"] ==
+        "TIMEOUT"
     ).sum()
 
-    total_r = df["r"].sum()
+    total_r = (
+        result_df["r"].sum()
+    )
 
-    avg_r = df["r"].mean()
+    avg_r = (
+        result_df["r"].mean()
+    )
 
     total_return = (
-        df["net_return"].sum()
+        result_df["net_return"].sum()
     )
 
     avg_return = (
-        df["net_return"].mean()
+        result_df["net_return"].mean()
+    )
+
+    avg_mfe = (
+        result_df["mfe"].mean()
+    )
+
+    avg_mae = (
+        result_df["mae"].mean()
     )
 
     print(
@@ -945,11 +1104,13 @@ def print_stats(
     )
 
     print(
-        f"TP: {tp} ({tp / total * 100:.1f}%)"
+        f"TP: {tp} "
+        f"({tp / total * 100:.1f}%)"
     )
 
     print(
-        f"SL: {sl} ({sl / total * 100:.1f}%)"
+        f"SL: {sl} "
+        f"({sl / total * 100:.1f}%)"
     )
 
     print(
@@ -977,12 +1138,12 @@ def print_stats(
 
     print(
         f"Average MFE: "
-        f"{df['mfe'].mean() * 100:.2f}%"
+        f"{avg_mfe * 100:.2f}%"
     )
 
     print(
         f"Average MAE: "
-        f"{df['mae'].mean() * 100:.2f}%"
+        f"{avg_mae * 100:.2f}%"
     )
 
 
@@ -992,10 +1153,12 @@ def print_stats(
 
 def direction_stats(trades):
 
-    df = pd.DataFrame(trades)
-
-    if df.empty:
+    if not trades:
         return
+
+    df = pd.DataFrame(
+        trades
+    )
 
     print("\n📊 Direction breakdown")
 
@@ -1033,7 +1196,7 @@ def direction_stats(trades):
         )
 
         print(
-            f"Avg R: "
+            f"Average R: "
             f"{part['r'].mean():.3f}"
         )
 
@@ -1044,15 +1207,17 @@ def direction_stats(trades):
 
 def regime_stats(trades):
 
-    df = pd.DataFrame(trades)
-
-    if df.empty:
+    if not trades:
         return
+
+    df = pd.DataFrame(
+        trades
+    )
 
     print("\n📈 Market regime breakdown")
 
-    for regime, part in df.groupby(
-        "regime"
+    for regime, part in (
+        df.groupby("regime")
     ):
 
         print(
@@ -1076,7 +1241,7 @@ def regime_stats(trades):
         )
 
         print(
-            f"Avg R: "
+            f"Average R: "
             f"{part['r'].mean():.3f}"
         )
 
@@ -1089,7 +1254,9 @@ def walk_forward(df):
 
     print("\n")
     print("#" * 70)
-    print("🚀 MULTI-TIMEFRAME WALK-FORWARD BACKTEST")
+    print(
+        "🚀 MULTI-TIMEFRAME WALK-FORWARD BACKTEST"
+    )
     print("#" * 70)
 
     print(
@@ -1115,60 +1282,58 @@ def walk_forward(df):
     )
 
     print(
-        f"Validation = {VALIDATION_DAYS} days"
+        f"Validation = "
+        f"{VALIDATION_DAYS} days"
     )
 
     all_validation = []
 
-    total_days = (
-        df["time"].iloc[-1] -
-        df["time"].iloc[0]
-    ).total_seconds() / 86400
-
-    print(
-        f"\nAvailable data: "
-        f"{total_days:.1f} days"
-    )
-
     window_start = 0
-
     window_number = 1
 
     while True:
 
         train_end_time = (
-            df["time"].iloc[window_start]
+            df["time"].iloc[
+                window_start
+            ]
             +
-            pd.Timedelta(days=TRAIN_DAYS)
+            pd.Timedelta(
+                days=TRAIN_DAYS
+            )
         )
 
         validation_end_time = (
             train_end_time
             +
-            pd.Timedelta(days=VALIDATION_DAYS)
+            pd.Timedelta(
+                days=VALIDATION_DAYS
+            )
         )
 
-        train_end_candidates = df.index[
-            df["time"] >= train_end_time
+        train_candidates = df.index[
+            df["time"] >=
+            train_end_time
         ]
 
-        validation_end_candidates = df.index[
-            df["time"] >= validation_end_time
+        validation_candidates = df.index[
+            df["time"] >=
+            validation_end_time
         ]
 
         if (
-            len(train_end_candidates) == 0
+            len(train_candidates) == 0
             or
-            len(validation_end_candidates) == 0
+            len(validation_candidates) == 0
         ):
             break
 
         train_end = int(
-            train_end_candidates[0]
+            train_candidates[0]
         )
 
         validation_end = int(
-            validation_end_candidates[0]
+            validation_candidates[0]
         )
 
         print("\n" + "-" * 70)
@@ -1179,21 +1344,27 @@ def walk_forward(df):
 
         print(
             "Training:",
-            df["time"].iloc[window_start],
+            df["time"].iloc[
+                window_start
+            ],
             "→",
-            df["time"].iloc[train_end - 1]
+            df["time"].iloc[
+                train_end - 1
+            ]
         )
 
         print(
             "Validation:",
-            df["time"].iloc[train_end],
+            df["time"].iloc[
+                train_end
+            ],
             "→",
-            df["time"].iloc[validation_end - 1]
+            df["time"].iloc[
+                validation_end - 1
+            ]
         )
 
-        # ----------------------------
-        # TRAINING
-        # ----------------------------
+        # Training
 
         training_trades = run_backtest(
             df,
@@ -1206,13 +1377,7 @@ def walk_forward(df):
             f"WINDOW {window_number} TRAINING"
         )
 
-        # ----------------------------
         # Validation
-        #
-        # Important:
-        # This strategy is NOT optimized
-        # using validation data.
-        # ----------------------------
 
         validation_trades = run_backtest(
             df,
@@ -1231,23 +1396,27 @@ def walk_forward(df):
                 validation_trades
             )
 
-        window_start = (
-            window_start +
+        # Move forward 30 days
+
+        window_start += (
             30 * 96
         )
 
         window_number += 1
 
         if window_start >= train_end:
+
             break
 
     # ========================================================
-    # OVERALL VALIDATION
+    # FINAL RESULT
     # ========================================================
 
     print("\n")
     print("#" * 70)
-    print("📊 OVERALL VALIDATION RESULT")
+    print(
+        "📊 OVERALL VALIDATION RESULT"
+    )
     print("#" * 70)
 
     print_stats(
@@ -1274,19 +1443,31 @@ def main():
         "\n🚀 BTC 6-Month Multi-Timeframe Backtest Started!"
     )
 
+    # Download
+
     df = download_data()
+
+    # 15M indicators
 
     print(
         "\n📊 Calculating 15M indicators..."
     )
 
-    df = add_indicators(df)
+    df = add_indicators(
+        df
+    )
+
+    # 1H
 
     print(
         "📊 Building completed 1H candles..."
     )
 
-    h1 = build_1h_data(df)
+    h1 = build_1h_data(
+        df
+    )
+
+    # Merge
 
     print(
         "🔗 Combining 1H trend + 15M entry..."
@@ -1297,8 +1478,7 @@ def main():
         h1
     )
 
-    # Remove early rows without enough
-    # indicator history
+    # Remove rows without enough history
 
     df = df.dropna(
         subset=[
@@ -1310,19 +1490,30 @@ def main():
             "h1_ema50",
             "h1_ema100"
         ]
-    ).reset_index(drop=True)
+    ).reset_index(
+        drop=True
+    )
 
     print(
         "\nFinal usable candles:",
         len(df)
     )
 
-    walk_forward(df)
+    # Backtest
+
+    walk_forward(
+        df
+    )
 
     print(
         "\n✅ Backtest finished."
     )
 
 
+# ============================================================
+# START
+# ============================================================
+
 if __name__ == "__main__":
+
     main()
