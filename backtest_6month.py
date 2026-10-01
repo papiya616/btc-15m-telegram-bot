@@ -5,88 +5,68 @@ import time
 from datetime import datetime, timedelta, timezone
 
 # ============================================================
-# BTC 6-MONTH DYNAMIC EXIT / MFE-MAE BACKTEST
+# BTC 15M SIGNAL QUALITY FILTER BACKTEST
 # ============================================================
 
 PRODUCT = "BTC-USD"
 GRANULARITY = 900
-DAYS = 183
 CHUNK_CANDLES = 250
-
-ROUND_TRIP_COST = 0.0014
-
-MAX_HOLD_CANDLES = 12
-COOLDOWN_CANDLES = 12
+LOOKBACK_DAYS = 183
 
 TRAIN_DAYS = 120
 VALIDATION_DAYS = 63
 
-# Dynamic exit configurations
-EXIT_CONFIGS = [
-    ("TP_020", 0.20, 0.50),
-    ("TP_030", 0.30, 0.50),
-    ("TP_040", 0.40, 0.50),
-    ("TP_050", 0.50, 0.50),
+ROUND_TRIP_COST = 0.0014
+COOLDOWN_CANDLES = 12
 
-    ("TP_030_SL020", 0.30, 0.20),
-    ("TP_040_SL025", 0.40, 0.25),
-    ("TP_050_SL030", 0.50, 0.30),
-
-    ("TRAIL_020", 0.20, 0.20),
-    ("TRAIL_030", 0.30, 0.20),
-    ("TRAIL_040", 0.40, 0.25),
-
-    ("TIME_60M", 999, 60),
-    ("TIME_90M", 999, 90),
-    ("TIME_120M", 999, 120),
-]
-
+MIN_TRAIN_TRADES = 30
 
 # ============================================================
 # DOWNLOAD
 # ============================================================
 
-def download_data():
-
-    print("\n" + "=" * 70)
-    print("🚀 BTC 6-MONTH DYNAMIC EXIT BACKTEST")
-    print("=" * 70)
+def download_candles():
 
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=DAYS)
+    start_time = end_time - timedelta(days=LOOKBACK_DAYS)
 
-    rows = []
-    cursor = start_time
+    all_rows = []
 
-    while cursor < end_time:
+    chunk_seconds = GRANULARITY * CHUNK_CANDLES
+    current_start = int(start_time.timestamp())
+    final_end = int(end_time.timestamp())
 
-        chunk_end = min(
-            cursor + timedelta(
-                seconds=GRANULARITY * CHUNK_CANDLES
-            ),
-            end_time
+    while current_start < final_end:
+
+        current_end = min(
+            current_start + chunk_seconds,
+            final_end
         )
 
-        print(
-            f"Downloading: "
-            f"{cursor.strftime('%Y-%m-%d %H:%M')} "
-            f"to "
-            f"{chunk_end.strftime('%Y-%m-%d %H:%M')}"
-        )
-
-        url = (
-            f"https://api.exchange.coinbase.com/"
-            f"products/{PRODUCT}/candles"
-        )
+        url = f"https://api.exchange.coinbase.com/products/{PRODUCT}/candles"
 
         params = {
             "granularity": GRANULARITY,
-            "start": cursor.isoformat(),
-            "end": chunk_end.isoformat()
+            "start": datetime.fromtimestamp(
+                current_start, timezone.utc
+            ).isoformat(),
+            "end": datetime.fromtimestamp(
+                current_end, timezone.utc
+            ).isoformat()
         }
 
-        try:
+        print(
+            "Downloading:",
+            datetime.fromtimestamp(
+                current_start, timezone.utc
+            ).strftime("%Y-%m-%d %H:%M"),
+            "to",
+            datetime.fromtimestamp(
+                current_end, timezone.utc
+            ).strftime("%Y-%m-%d %H:%M")
+        )
 
+        try:
             r = requests.get(
                 url,
                 params=params,
@@ -98,25 +78,19 @@ def download_data():
             data = r.json()
 
             if isinstance(data, list):
-                rows.extend(data)
+                all_rows.extend(data)
 
         except Exception as e:
+            print("Download error:", e)
 
-            print("❌ Download error:", e)
-            time.sleep(2)
-            continue
-
-        cursor = chunk_end
-
+        current_start = current_end
         time.sleep(0.25)
 
-    if not rows:
-        raise RuntimeError(
-            "No BTC data downloaded."
-        )
+    if not all_rows:
+        raise RuntimeError("No BTC data downloaded.")
 
     df = pd.DataFrame(
-        rows,
+        all_rows,
         columns=[
             "time",
             "low",
@@ -133,13 +107,6 @@ def download_data():
         utc=True
     )
 
-    df = (
-        df
-        .drop_duplicates("time")
-        .sort_values("time")
-        .reset_index(drop=True)
-    )
-
     for col in [
         "open",
         "high",
@@ -147,68 +114,19 @@ def download_data():
         "close",
         "volume"
     ]:
-
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce"
         )
 
-    df = df.dropna().reset_index(drop=True)
-
-    print("\n" + "=" * 70)
-    print("DOWNLOAD COMPLETE")
-    print("=" * 70)
-
-    print(
-        "Total candles:",
-        len(df)
-    )
-
-    print(
-        "First candle :",
-        df["time"].iloc[0]
-    )
-
-    print(
-        "Last candle  :",
-        df["time"].iloc[-1]
+    df = (
+        df.dropna()
+        .drop_duplicates("time")
+        .sort_values("time")
+        .reset_index(drop=True)
     )
 
     return df
-
-
-# ============================================================
-# RSI
-# ============================================================
-
-def calculate_rsi(
-    series,
-    period=14
-):
-
-    delta = series.diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(
-        alpha=1 / period,
-        adjust=False
-    ).mean()
-
-    avg_loss = loss.ewm(
-        alpha=1 / period,
-        adjust=False
-    ).mean()
-
-    rs = (
-        avg_gain /
-        avg_loss.replace(0, np.nan)
-    )
-
-    return 100 - (
-        100 / (1 + rs)
-    )
 
 
 # ============================================================
@@ -219,6 +137,7 @@ def calculate_indicators(df):
 
     df = df.copy()
 
+    # EMA
     df["ema9"] = df["close"].ewm(
         span=9,
         adjust=False
@@ -234,10 +153,32 @@ def calculate_indicators(df):
         adjust=False
     ).mean()
 
-    df["rsi"] = calculate_rsi(
-        df["close"]
+    # RSI
+    delta = df["close"].diff()
+
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(
+        alpha=1 / 14,
+        adjust=False
+    ).mean()
+
+    avg_loss = loss.ewm(
+        alpha=1 / 14,
+        adjust=False
+    ).mean()
+
+    rs = avg_gain / avg_loss.replace(
+        0,
+        np.nan
     )
 
+    df["rsi"] = 100 - (
+        100 / (1 + rs)
+    )
+
+    # MACD
     ema12 = df["close"].ewm(
         span=12,
         adjust=False
@@ -248,9 +189,7 @@ def calculate_indicators(df):
         adjust=False
     ).mean()
 
-    df["macd"] = (
-        ema12 - ema26
-    )
+    df["macd"] = ema12 - ema26
 
     df["macd_signal"] = df["macd"].ewm(
         span=9,
@@ -262,68 +201,54 @@ def calculate_indicators(df):
         df["macd_signal"]
     )
 
-    previous_close = df["close"].shift(1)
+    # ATR
+    prev_close = df["close"].shift(1)
 
-    tr1 = (
-        df["high"] -
-        df["low"]
-    )
+    tr1 = df["high"] - df["low"]
 
     tr2 = (
         df["high"] -
-        previous_close
+        prev_close
     ).abs()
 
     tr3 = (
         df["low"] -
-        previous_close
+        prev_close
     ).abs()
 
-    df["tr"] = pd.concat(
+    true_range = pd.concat(
         [tr1, tr2, tr3],
         axis=1
     ).max(axis=1)
 
-    df["atr"] = (
-        df["tr"]
-        .rolling(14)
-        .mean()
-    )
+    df["atr"] = true_range.rolling(
+        14
+    ).mean()
 
-    df["volume_avg"] = (
-        df["volume"]
-        .rolling(20)
-        .mean()
-    )
+    # Volume ratio
+    df["volume_avg"] = df["volume"].rolling(
+        20
+    ).mean()
 
     df["volume_ratio"] = (
         df["volume"] /
         df["volume_avg"]
     )
 
+    # Candle body
+    df["body"] = (
+        df["close"] -
+        df["open"]
+    ).abs()
+
     df["body_atr"] = (
-        (
-            df["close"] -
-            df["open"]
-        ).abs()
-        / df["atr"]
+        df["body"] /
+        df["atr"]
     )
 
-    df["bullish"] = (
-        df["close"] >
-        df["open"]
-    )
-
-    df["bearish"] = (
-        df["close"] <
-        df["open"]
-    )
-
-    df["ema_distance"] = (
-        (
-            df["close"] -
-            df["ema21"]
-        ).abs()
+    # Distance from EMA21
+    df["ema21_distance_atr"] = (
+        (df["close"] - df["ema21"]).abs()
         / df["atr"]
     )
 
@@ -336,97 +261,74 @@ def calculate_indicators(df):
 
 def build_1h_regime(df):
 
-    hourly = (
-        df.set_index("time")
-        .resample("1h")
-        .agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum"
-        })
-        .dropna()
-        .reset_index()
-    )
+    temp = df.set_index("time")
 
-    hourly["ema20"] = (
-        hourly["close"]
-        .ewm(span=20, adjust=False)
-        .mean()
-    )
+    hourly = temp.resample("1h").agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last"
+    }).dropna().reset_index()
 
-    hourly["ema50"] = (
-        hourly["close"]
-        .ewm(span=50, adjust=False)
-        .mean()
-    )
+    hourly["ema20"] = hourly["close"].ewm(
+        span=20,
+        adjust=False
+    ).mean()
 
-    hourly["ema100"] = (
-        hourly["close"]
-        .ewm(span=100, adjust=False)
-        .mean()
-    )
+    hourly["ema50"] = hourly["close"].ewm(
+        span=50,
+        adjust=False
+    ).mean()
 
-    hourly["slope20"] = (
+    hourly["ema100"] = hourly["close"].ewm(
+        span=100,
+        adjust=False
+    ).mean()
+
+    hourly["ema20_slope"] = (
         hourly["ema20"] -
         hourly["ema20"].shift(3)
     )
 
-    hourly["slope50"] = (
+    hourly["ema50_slope"] = (
         hourly["ema50"] -
         hourly["ema50"].shift(3)
     )
 
-    hourly["regime"] = "SIDEWAYS"
+    def regime(row):
 
-    strong_up = (
-        (hourly["close"] > hourly["ema20"]) &
-        (hourly["ema20"] > hourly["ema50"]) &
-        (hourly["ema50"] > hourly["ema100"]) &
-        (hourly["slope20"] > 0) &
-        (hourly["slope50"] > 0)
+        if (
+            row["ema20"] >
+            row["ema50"] >
+            row["ema100"] and
+            row["ema20_slope"] > 0 and
+            row["ema50_slope"] > 0
+        ):
+            return "STRONG_UP"
+
+        if (
+            row["ema20"] <
+            row["ema50"] <
+            row["ema100"] and
+            row["ema20_slope"] < 0 and
+            row["ema50_slope"] < 0
+        ):
+            return "STRONG_DOWN"
+
+        if row["ema20"] > row["ema50"]:
+            return "NORMAL_UP"
+
+        if row["ema20"] < row["ema50"]:
+            return "NORMAL_DOWN"
+
+        return "SIDEWAYS"
+
+    hourly["regime"] = hourly.apply(
+        regime,
+        axis=1
     )
 
-    strong_down = (
-        (hourly["close"] < hourly["ema20"]) &
-        (hourly["ema20"] < hourly["ema50"]) &
-        (hourly["ema50"] < hourly["ema100"]) &
-        (hourly["slope20"] < 0) &
-        (hourly["slope50"] < 0)
-    )
-
-    normal_up = (
-        (hourly["close"] > hourly["ema20"]) &
-        (hourly["ema20"] > hourly["ema50"])
-    )
-
-    normal_down = (
-        (hourly["close"] < hourly["ema20"]) &
-        (hourly["ema20"] < hourly["ema50"])
-    )
-
-    hourly.loc[
-        normal_up,
-        "regime"
-    ] = "NORMAL_UP"
-
-    hourly.loc[
-        normal_down,
-        "regime"
-    ] = "NORMAL_DOWN"
-
-    hourly.loc[
-        strong_up,
-        "regime"
-    ] = "STRONG_UP"
-
-    hourly.loc[
-        strong_down,
-        "regime"
-    ] = "STRONG_DOWN"
-
-    # Only completed 1H candle is available
+    # Only COMPLETED hourly candle information
     hourly["available_time"] = (
         hourly["time"] +
         pd.Timedelta(hours=1)
@@ -435,505 +337,590 @@ def build_1h_regime(df):
     hourly["available_time"] = pd.to_datetime(
         hourly["available_time"],
         utc=True
-    ).astype(
-        "datetime64[ns, UTC]"
-    )
+    ).astype("datetime64[ns, UTC]")
 
-    return hourly[
+    hourly = hourly[
         [
             "available_time",
             "regime"
         ]
     ]
 
-
-# ============================================================
-# MERGE 1H REGIME
-# ============================================================
-
-def merge_regime(
-    df,
-    hourly
-):
-
     df["time"] = pd.to_datetime(
         df["time"],
         utc=True
-    ).astype(
-        "datetime64[ns, UTC]"
-    )
+    ).astype("datetime64[ns, UTC]")
 
-    hourly["available_time"] = pd.to_datetime(
-        hourly["available_time"],
-        utc=True
-    ).astype(
-        "datetime64[ns, UTC]"
-    )
-
-    return pd.merge_asof(
+    df = pd.merge_asof(
         df.sort_values("time"),
-        hourly.sort_values(
-            "available_time"
-        ),
+        hourly.sort_values("available_time"),
         left_on="time",
         right_on="available_time",
         direction="backward"
     )
 
+    return df
+
 
 # ============================================================
-# ENTRY SIGNAL
+# BASE SIGNAL
 # ============================================================
 
-def get_signal(row):
+def get_base_signal(row):
+
+    if pd.isna(row["regime"]):
+        return None
 
     if row["regime"] == "SIDEWAYS":
-        return "WAIT"
+        return None
 
-    buy = 0
-    sell = 0
+    buy_score = 0
+    sell_score = 0
 
-    # BUY
-
+    # 1H regime
     if row["regime"] in [
         "STRONG_UP",
         "NORMAL_UP"
     ]:
-        buy += 2
-
-    if (
-        row["ema9"] >
-        row["ema21"] >
-        row["ema50"]
-    ):
-        buy += 2
-
-    if row["close"] > row["ema21"]:
-        buy += 1
-
-    if row["macd_hist"] > 0:
-        buy += 2
-
-    if 50 <= row["rsi"] <= 68:
-        buy += 1
-
-    if row["volume_ratio"] >= 1.2:
-        buy += 1
-
-    if (
-        row["bullish"] and
-        row["body_atr"] >= 0.25
-    ):
-        buy += 1
-
-    if row["ema_distance"] > 1.5:
-        buy -= 3
-
-    # SELL
+        buy_score += 2
 
     if row["regime"] in [
         "STRONG_DOWN",
         "NORMAL_DOWN"
     ]:
-        sell += 2
+        sell_score += 2
+
+    # EMA alignment
+    if (
+        row["ema9"] >
+        row["ema21"] >
+        row["ema50"]
+    ):
+        buy_score += 2
 
     if (
         row["ema9"] <
         row["ema21"] <
         row["ema50"]
     ):
-        sell += 2
+        sell_score += 2
+
+    # Price vs EMA21
+    if row["close"] > row["ema21"]:
+        buy_score += 1
 
     if row["close"] < row["ema21"]:
-        sell += 1
+        sell_score += 1
+
+    # MACD
+    if row["macd_hist"] > 0:
+        buy_score += 2
 
     if row["macd_hist"] < 0:
-        sell += 2
+        sell_score += 2
+
+    # RSI
+    if 50 <= row["rsi"] <= 68:
+        buy_score += 1
 
     if 32 <= row["rsi"] <= 50:
-        sell += 1
+        sell_score += 1
 
+    # Volume
     if row["volume_ratio"] >= 1.2:
-        sell += 1
+
+        if buy_score > sell_score:
+            buy_score += 1
+
+        elif sell_score > buy_score:
+            sell_score += 1
+
+    # Candle
+    if row["body_atr"] >= 0.25:
+
+        if row["close"] > row["open"]:
+            buy_score += 1
+
+        elif row["close"] < row["open"]:
+            sell_score += 1
+
+    # Overextension penalty
+    if row["ema21_distance_atr"] > 1.5:
+
+        buy_score -= 3
+        sell_score -= 3
 
     if (
-        row["bearish"] and
-        row["body_atr"] >= 0.25
+        buy_score >= 6 and
+        buy_score > sell_score
     ):
-        sell += 1
-
-    if row["ema_distance"] > 1.5:
-        sell -= 3
-
-    if buy >= 6 and buy > sell:
         return "BUY"
 
-    if sell >= 6 and sell > buy:
+    if (
+        sell_score >= 6 and
+        sell_score > buy_score
+    ):
         return "SELL"
 
-    return "WAIT"
+    return None
 
 
 # ============================================================
-# DYNAMIC TRADE SIMULATION
+# CONDITION BUCKETS
 # ============================================================
 
-def simulate_trade(
+def get_conditions(row, direction):
+
+    conditions = []
+
+    # Direction
+    conditions.append(
+        ("DIRECTION", direction)
+    )
+
+    # 1H regime
+    conditions.append(
+        ("REGIME", row["regime"])
+    )
+
+    # RSI
+    rsi = row["rsi"]
+
+    if rsi < 35:
+        rsi_bucket = "RSI_LT35"
+    elif rsi < 45:
+        rsi_bucket = "RSI_35_45"
+    elif rsi < 55:
+        rsi_bucket = "RSI_45_55"
+    elif rsi < 65:
+        rsi_bucket = "RSI_55_65"
+    else:
+        rsi_bucket = "RSI_GT65"
+
+    conditions.append(
+        ("RSI", rsi_bucket)
+    )
+
+    # MACD
+    conditions.append(
+        (
+            "MACD",
+            "MACD_UP"
+            if row["macd_hist"] > 0
+            else "MACD_DOWN"
+        )
+    )
+
+    # Volume
+    vr = row["volume_ratio"]
+
+    if vr < 0.8:
+        volume_bucket = "VOL_LT08"
+    elif vr <= 1.2:
+        volume_bucket = "VOL_08_12"
+    else:
+        volume_bucket = "VOL_GT12"
+
+    conditions.append(
+        ("VOLUME", volume_bucket)
+    )
+
+    # EMA21 distance
+    dist = row["ema21_distance_atr"]
+
+    if dist < 0.25:
+        distance_bucket = "DIST_LT025"
+    elif dist < 0.50:
+        distance_bucket = "DIST_025_050"
+    elif dist < 1.00:
+        distance_bucket = "DIST_050_100"
+    else:
+        distance_bucket = "DIST_GT100"
+
+    conditions.append(
+        ("DISTANCE", distance_bucket)
+    )
+
+    # Candle body
+    body = row["body_atr"]
+
+    if body < 0.25:
+        body_bucket = "BODY_LT025"
+    elif body < 0.50:
+        body_bucket = "BODY_025_050"
+    else:
+        body_bucket = "BODY_GT050"
+
+    conditions.append(
+        ("BODY", body_bucket)
+    )
+
+    return conditions
+
+
+# ============================================================
+# FORWARD MOVEMENT
+# ============================================================
+
+def calculate_forward_stats(
     df,
     index,
-    direction,
-    config_name,
-    target,
-    stop
+    direction
 ):
 
-    entry = float(
-        df.iloc[index]["close"]
-    )
+    entry = df.iloc[index]["close"]
 
-    if direction == "BUY":
+    future = df.iloc[
+        index + 1:
+    ]
 
-        favorable_target = (
-            entry *
-            (1 + target / 100)
-        )
-
-        adverse_stop = (
-            entry *
-            (1 - stop / 100)
-        )
-
-    else:
-
-        favorable_target = (
-            entry *
-            (1 - target / 100)
-        )
-
-        adverse_stop = (
-            entry *
-            (1 + stop / 100)
-        )
-
-    max_candles = MAX_HOLD_CANDLES
-
-    # TIME based configurations
-    if config_name.startswith("TIME_"):
-
-        minutes = stop
-        max_candles = max(
-            1,
-            int(minutes / 15)
-        )
-
-    end = min(
-        index + max_candles,
-        len(df) - 1
-    )
-
-    mfe = 0.0
-    mae = 0.0
-
-    entry_price = entry
-
-    for j in range(
-        index + 1,
-        end + 1
-    ):
-
-        high = float(
-            df.iloc[j]["high"]
-        )
-
-        low = float(
-            df.iloc[j]["low"]
-        )
-
-        if direction == "BUY":
-
-            favorable = (
-                high /
-                entry_price - 1
-            )
-
-            adverse = (
-                low /
-                entry_price - 1
-            )
-
-            mfe = max(
-                mfe,
-                favorable
-            )
-
-            mae = min(
-                mae,
-                adverse
-            )
-
-            # For fixed TP/SL
-            if not config_name.startswith("TIME_"):
-
-                if (
-                    low <= adverse_stop
-                    and
-                    high >= favorable_target
-                ):
-
-                    # Conservative assumption
-                    # when both happen in same candle
-                    gross = -stop / 100
-
-                    net = (
-                        gross -
-                        ROUND_TRIP_COST
-                    )
-
-                    return {
-                        "result": "SL",
-                        "return": net,
-                        "mfe": mfe,
-                        "mae": mae
-                    }
-
-                if low <= adverse_stop:
-
-                    gross = -stop / 100
-
-                    net = (
-                        gross -
-                        ROUND_TRIP_COST
-                    )
-
-                    return {
-                        "result": "SL",
-                        "return": net,
-                        "mfe": mfe,
-                        "mae": mae
-                    }
-
-                if high >= favorable_target:
-
-                    gross = target / 100
-
-                    net = (
-                        gross -
-                        ROUND_TRIP_COST
-                    )
-
-                    return {
-                        "result": "TP",
-                        "return": net,
-                        "mfe": mfe,
-                        "mae": mae
-                    }
-
-        else:
-
-            favorable = (
-                entry_price /
-                low - 1
-            )
-
-            adverse = (
-                entry_price /
-                high - 1
-            )
-
-            mfe = max(
-                mfe,
-                favorable
-            )
-
-            mae = min(
-                mae,
-                adverse
-            )
-
-            if not config_name.startswith("TIME_"):
-
-                if (
-                    high >= adverse_stop
-                    and
-                    low <= favorable_target
-                ):
-
-                    gross = -stop / 100
-
-                    net = (
-                        gross -
-                        ROUND_TRIP_COST
-                    )
-
-                    return {
-                        "result": "SL",
-                        "return": net,
-                        "mfe": mfe,
-                        "mae": mae
-                    }
-
-                if high >= adverse_stop:
-
-                    gross = -stop / 100
-
-                    net = (
-                        gross -
-                        ROUND_TRIP_COST
-                    )
-
-                    return {
-                        "result": "SL",
-                        "return": net,
-                        "mfe": mfe,
-                        "mae": mae
-                    }
-
-                if low <= favorable_target:
-
-                    gross = target / 100
-
-                    net = (
-                        gross -
-                        ROUND_TRIP_COST
-                    )
-
-                    return {
-                        "result": "TP",
-                        "return": net,
-                        "mfe": mfe,
-                        "mae": mae
-                    }
-
-    # TIME EXIT
-    exit_price = float(
-        df.iloc[end]["close"]
-    )
-
-    if direction == "BUY":
-
-        gross = (
-            exit_price /
-            entry_price - 1
-        )
-
-    else:
-
-        gross = (
-            entry_price /
-            exit_price - 1
-        )
-
-    net = (
-        gross -
-        ROUND_TRIP_COST
-    )
-
-    return {
-        "result": "TIMEOUT",
-        "return": net,
-        "mfe": mfe,
-        "mae": mae
-    }
-
-
-# ============================================================
-# RUN CONFIG
-# ============================================================
-
-def run_config(
-    df,
-    start,
-    end,
-    config_name,
-    target,
-    stop
-):
-
-    trades = []
-
-    i = start
-
-    while i < end - 1:
-
-        signal = get_signal(
-            df.iloc[i]
-        )
-
-        if signal == "WAIT":
-
-            i += 1
-            continue
-
-        result = simulate_trade(
-            df,
-            i,
-            signal,
-            config_name,
-            target,
-            stop
-        )
-
-        trades.append({
-            "time": df.iloc[i]["time"],
-            "direction": signal,
-            "regime": df.iloc[i]["regime"],
-            "result": result["result"],
-            "return": result["return"],
-            "mfe": result["mfe"],
-            "mae": result["mae"]
-        })
-
-        i += COOLDOWN_CANDLES
-
-    return pd.DataFrame(
-        trades
-    )
-
-
-# ============================================================
-# SUMMARY
-# ============================================================
-
-def summarize(trades):
-
-    if trades.empty:
+    if future.empty:
         return None
 
-    total = len(trades)
+    max_high = future["high"].max()
+    min_low = future["low"].min()
 
-    tp = (
-        trades["result"] == "TP"
-    ).sum()
+    if direction == "BUY":
 
-    sl = (
-        trades["result"] == "SL"
-    ).sum()
+        mfe = (
+            (max_high - entry)
+            / entry
+        )
 
-    timeout = (
-        trades["result"] == "TIMEOUT"
-    ).sum()
+        mae = (
+            (min_low - entry)
+            / entry
+        )
 
-    total_return = (
-        trades["return"].sum()
-    )
+        ret15 = get_future_return(
+            df,
+            index,
+            1,
+            direction
+        )
 
-    avg_return = (
-        trades["return"].mean()
-    )
+        ret30 = get_future_return(
+            df,
+            index,
+            2,
+            direction
+        )
+
+        ret60 = get_future_return(
+            df,
+            index,
+            4,
+            direction
+        )
+
+        ret120 = get_future_return(
+            df,
+            index,
+            8,
+            direction
+        )
+
+    else:
+
+        mfe = (
+            (entry - min_low)
+            / entry
+        )
+
+        mae = (
+            (entry - max_high)
+            / entry
+        )
+
+        ret15 = get_future_return(
+            df,
+            index,
+            1,
+            direction
+        )
+
+        ret30 = get_future_return(
+            df,
+            index,
+            2,
+            direction
+        )
+
+        ret60 = get_future_return(
+            df,
+            index,
+            4,
+            direction
+        )
+
+        ret120 = get_future_return(
+            df,
+            index,
+            8,
+            direction
+        )
 
     return {
-        "trades": total,
-        "tp": tp,
-        "sl": sl,
-        "timeout": timeout,
-        "tp_pct": tp / total * 100,
-        "sl_pct": sl / total * 100,
-        "timeout_pct": timeout / total * 100,
-        "total_return": total_return,
-        "avg_return": avg_return,
-        "avg_mfe": trades["mfe"].mean(),
-        "avg_mae": trades["mae"].mean()
+        "mfe": mfe,
+        "mae": mae,
+        "ret15": ret15,
+        "ret30": ret30,
+        "ret60": ret60,
+        "ret120": ret120
     }
+
+
+def get_future_return(
+    df,
+    index,
+    candles,
+    direction
+):
+
+    future_index = index + candles
+
+    if future_index >= len(df):
+        return np.nan
+
+    entry = df.iloc[index]["close"]
+    future = df.iloc[
+        future_index
+    ]["close"]
+
+    if direction == "BUY":
+        return (
+            future - entry
+        ) / entry
+
+    return (
+        entry - future
+    ) / entry
+
+
+# ============================================================
+# COLLECT SIGNAL DATA
+# ============================================================
+
+def collect_signals(df):
+
+    records = []
+
+    last_trade_index = -999999
+
+    for i in range(
+        120,
+        len(df) - 8
+    ):
+
+        row = df.iloc[i]
+
+        if pd.isna(row["atr"]):
+            continue
+
+        direction = get_base_signal(row)
+
+        if direction is None:
+            continue
+
+        # Cooldown
+        if (
+            i - last_trade_index
+            < COOLDOWN_CANDLES
+        ):
+            continue
+
+        stats = calculate_forward_stats(
+            df,
+            i,
+            direction
+        )
+
+        if stats is None:
+            continue
+
+        # Cost-adjusted returns
+        stats["ret15"] -= ROUND_TRIP_COST
+        stats["ret30"] -= ROUND_TRIP_COST
+        stats["ret60"] -= ROUND_TRIP_COST
+        stats["ret120"] -= ROUND_TRIP_COST
+
+        conditions = get_conditions(
+            row,
+            direction
+        )
+
+        record = {
+            "time": row["time"],
+            "direction": direction,
+            "regime": row["regime"],
+            "rsi": row["rsi"],
+            "volume_ratio": row["volume_ratio"],
+            "ema21_distance_atr":
+                row["ema21_distance_atr"],
+            "body_atr":
+                row["body_atr"],
+            "mfe": stats["mfe"],
+            "mae": stats["mae"],
+            "ret15": stats["ret15"],
+            "ret30": stats["ret30"],
+            "ret60": stats["ret60"],
+            "ret120": stats["ret120"],
+        }
+
+        for name, value in conditions:
+            record[name] = value
+
+        records.append(record)
+
+        last_trade_index = i
+
+    return pd.DataFrame(records)
+
+
+# ============================================================
+# CONDITION TEST
+# ============================================================
+
+def analyze_conditions(
+    train_df,
+    validation_df
+):
+
+    candidate_rows = []
+
+    condition_columns = [
+        "DIRECTION",
+        "REGIME",
+        "RSI",
+        "MACD",
+        "VOLUME",
+        "DISTANCE",
+        "BODY"
+    ]
+
+    # --------------------------------------------------------
+    # Single conditions
+    # --------------------------------------------------------
+
+    for column in condition_columns:
+
+        for value in train_df[column].dropna().unique():
+
+            subset = train_df[
+                train_df[column] == value
+            ]
+
+            if len(subset) < MIN_TRAIN_TRADES:
+                continue
+
+            avg_return = subset[
+                "ret60"
+            ].mean()
+
+            candidate_rows.append({
+                "type": "SINGLE",
+                "condition":
+                    f"{column}={value}",
+                "column1": column,
+                "value1": value,
+                "column2": "",
+                "value2": "",
+                "train_trades":
+                    len(subset),
+                "train_avg_return":
+                    avg_return
+            })
+
+    # --------------------------------------------------------
+    # Two-condition combinations
+    # --------------------------------------------------------
+
+    for a in range(
+        len(condition_columns)
+    ):
+
+        for b in range(
+            a + 1,
+            len(condition_columns)
+        ):
+
+            col1 = condition_columns[a]
+            col2 = condition_columns[b]
+
+            grouped = train_df.groupby(
+                [col1, col2]
+            )
+
+            for (
+                (value1, value2),
+                subset
+            ) in grouped:
+
+                if len(subset) < MIN_TRAIN_TRADES:
+                    continue
+
+                avg_return = subset[
+                    "ret60"
+                ].mean()
+
+                candidate_rows.append({
+                    "type": "DOUBLE",
+                    "condition":
+                        f"{col1}={value1} AND "
+                        f"{col2}={value2}",
+                    "column1": col1,
+                    "value1": value1,
+                    "column2": col2,
+                    "value2": value2,
+                    "train_trades":
+                        len(subset),
+                    "train_avg_return":
+                        avg_return
+                })
+
+    candidates = pd.DataFrame(
+        candidate_rows
+    )
+
+    if candidates.empty:
+        return candidates
+
+    # Only positive training conditions
+    candidates = candidates[
+        candidates["train_avg_return"] > 0
+    ].copy()
+
+    candidates = candidates.sort_values(
+        "train_avg_return",
+        ascending=False
+    )
+
+    return candidates
+
+
+# ============================================================
+# APPLY CONDITION TO VALIDATION
+# ============================================================
+
+def apply_condition(
+    df,
+    candidate
+):
+
+    mask = (
+        df[candidate["column1"]]
+        == candidate["value1"]
+    )
+
+    if (
+        candidate["type"] == "DOUBLE"
+    ):
+        mask &= (
+            df[candidate["column2"]]
+            == candidate["value2"]
+        )
+
+    return df[mask]
 
 
 # ============================================================
@@ -942,28 +929,43 @@ def summarize(trades):
 
 def main():
 
-    df = download_data()
+    print()
+    print("==========================================")
+    print("🚀 BTC SIGNAL QUALITY BACKTEST")
+    print("==========================================")
+    print()
+
+    print("📥 Downloading BTC 15M data...")
+
+    df = download_candles()
+
+    print()
+    print(
+        "Total candles:",
+        len(df)
+    )
 
     print(
-        "\n📊 Calculating indicators..."
+        "First candle:",
+        df["time"].iloc[0]
     )
+
+    print(
+        "Last candle:",
+        df["time"].iloc[-1]
+    )
+
+    print()
+
+    print("📊 Calculating indicators...")
 
     df = calculate_indicators(df)
 
     print(
-        "📊 Building 1H regime..."
+        "📊 Building completed 1H regime..."
     )
 
-    hourly = build_1h_regime(df)
-
-    print(
-        "📊 Merging 1H regime..."
-    )
-
-    df = merge_regime(
-        df,
-        hourly
-    )
+    df = build_1h_regime(df)
 
     df = df.dropna(
         subset=[
@@ -974,301 +976,342 @@ def main():
             "volume_ratio",
             "regime"
         ]
-    ).reset_index(
-        drop=True
-    )
+    ).reset_index(drop=True)
 
     print(
         "Final usable candles:",
         len(df)
     )
 
-    last_time = df["time"].iloc[-1]
+    # ========================================================
+    # SIGNALS
+    # ========================================================
 
-    validation_start = (
-        last_time -
-        pd.Timedelta(
-            days=VALIDATION_DAYS
-        )
+    print()
+    print("🔎 Collecting base signals...")
+
+    signals = collect_signals(df)
+
+    if signals.empty:
+        print("No signals found.")
+        return
+
+    print(
+        "Base signals:",
+        len(signals)
     )
 
-    train_start = (
-        validation_start -
-        pd.Timedelta(
-            days=TRAIN_DAYS
-        )
+    # ========================================================
+    # TRAIN / VALIDATION SPLIT
+    # ========================================================
+
+    start_time = signals["time"].min()
+
+    train_end = (
+        start_time +
+        pd.Timedelta(days=TRAIN_DAYS)
     )
 
-    train_indices = df.index[
-        (df["time"] >= train_start) &
-        (df["time"] < validation_start)
-    ]
+    validation_end = (
+        train_end +
+        pd.Timedelta(days=VALIDATION_DAYS)
+    )
 
-    validation_indices = df.index[
-        df["time"] >= validation_start
-    ]
+    train = signals[
+        signals["time"] < train_end
+    ].copy()
 
-    train_start_idx = train_indices.min()
-    train_end_idx = train_indices.max()
+    validation = signals[
+        (
+            signals["time"] >= train_end
+        ) &
+        (
+            signals["time"] <= validation_end
+        )
+    ].copy()
 
-    validation_start_idx = validation_indices.min()
-    validation_end_idx = validation_indices.max()
-
-    print("\n" + "=" * 70)
-    print("WALK-FORWARD")
-    print("=" * 70)
+    print()
+    print("==========================================")
+    print("TRAIN / VALIDATION")
+    print("==========================================")
 
     print(
         "Training:",
-        df.iloc[train_start_idx]["time"],
+        train["time"].min(),
         "→",
-        df.iloc[train_end_idx]["time"]
+        train["time"].max()
     )
 
     print(
         "Validation:",
-        df.iloc[validation_start_idx]["time"],
+        validation["time"].min(),
         "→",
-        df.iloc[validation_end_idx]["time"]
+        validation["time"].max()
+    )
+
+    print(
+        "Training trades:",
+        len(train)
+    )
+
+    print(
+        "Validation trades:",
+        len(validation)
     )
 
     # ========================================================
-    # TRAINING
+    # TRAIN CONDITIONS
     # ========================================================
 
-    print("\n" + "=" * 70)
-    print("🧪 TRAINING DYNAMIC EXIT CONFIGURATIONS")
-    print("=" * 70)
+    print()
+    print("==========================================")
+    print("🔎 TRAINING CONDITION SEARCH")
+    print("==========================================")
 
-    training_results = []
+    candidates = analyze_conditions(
+        train,
+        validation
+    )
 
-    for config_name, target, stop in EXIT_CONFIGS:
+    if candidates.empty:
 
-        trades = run_config(
-            df,
-            train_start_idx,
-            train_end_idx,
-            config_name,
-            target,
-            stop
+        print()
+        print(
+            "❌ No condition had positive "
+            "training average return."
         )
-
-        summary = summarize(
-            trades
-        )
-
-        if summary is None:
-            continue
-
-        training_results.append({
-            "config": config_name,
-            "target": target,
-            "stop": stop,
-            **summary
-        })
 
         print(
-            f"{config_name:<18} "
-            f"Trades={summary['trades']:3d} | "
-            f"TP={summary['tp_pct']:5.1f}% | "
-            f"SL={summary['sl_pct']:5.1f}% | "
-            f"Total={summary['total_return']*100:+7.2f}% | "
-            f"Avg={summary['avg_return']*100:+.3f}%"
+            "Therefore validation is not "
+            "run."
         )
 
-    # ========================================================
-    # SELECT TRAINING CONFIG
-    # ========================================================
-
-    if not training_results:
-
-        print(
-            "\n❌ No training results."
+        signals.to_csv(
+            "btc_signal_quality_all.csv",
+            index=False
         )
 
         return
 
-    selected = max(
-        training_results,
-        key=lambda x: x["avg_return"]
+    print()
+    print(
+        "Positive training conditions:",
+        len(candidates)
     )
 
-    print("\n" + "=" * 70)
-    print("SELECTED FROM TRAINING ONLY")
-    print("=" * 70)
+    print()
 
     print(
-        "Configuration:",
-        selected["config"]
-    )
-
-    print(
-        "Training Avg:",
-        f"{selected['avg_return']*100:+.3f}%"
+        candidates[
+            [
+                "type",
+                "condition",
+                "train_trades",
+                "train_avg_return"
+            ]
+        ].head(20).to_string(
+            index=False
+        )
     )
 
     # ========================================================
-    # UNSEEN VALIDATION
+    # VALIDATION
     # ========================================================
 
-    print("\n" + "=" * 70)
-    print("🔬 UNSEEN VALIDATION")
-    print("=" * 70)
+    print()
+    print("==========================================")
+    print("🧪 UNSEEN VALIDATION")
+    print("==========================================")
 
-    validation_trades = run_config(
-        df,
-        validation_start_idx,
-        validation_end_idx,
-        selected["config"],
-        selected["target"],
-        selected["stop"]
-    )
+    validation_results = []
 
-    validation_summary = summarize(
-        validation_trades
-    )
+    # Test up to 20 conditions selected
+    # ONLY from training data.
+    selected = candidates.head(20)
 
-    if validation_summary is None:
+    for _, candidate in selected.iterrows():
 
-        print(
-            "No validation trades."
+        subset = apply_condition(
+            validation,
+            candidate
         )
 
-        return
-
-    print(
-        f"Configuration : {selected['config']}"
-    )
-
-    print(
-        f"Trades        : "
-        f"{validation_summary['trades']}"
-    )
-
-    print(
-        f"TP            : "
-        f"{validation_summary['tp_pct']:.1f}%"
-    )
-
-    print(
-        f"SL            : "
-        f"{validation_summary['sl_pct']:.1f}%"
-    )
-
-    print(
-        f"Timeout       : "
-        f"{validation_summary['timeout_pct']:.1f}%"
-    )
-
-    print(
-        f"Total return  : "
-        f"{validation_summary['total_return']*100:+.2f}%"
-    )
-
-    print(
-        f"Average return: "
-        f"{validation_summary['avg_return']*100:+.3f}%"
-    )
-
-    print(
-        f"Average MFE   : "
-        f"{validation_summary['avg_mfe']*100:+.3f}%"
-    )
-
-    print(
-        f"Average MAE   : "
-        f"{validation_summary['avg_mae']*100:+.3f}%"
-    )
-
-    # ========================================================
-    # DIRECTION
-    # ========================================================
-
-    print("\n" + "=" * 70)
-    print("VALIDATION BY DIRECTION")
-    print("=" * 70)
-
-    for direction in [
-        "BUY",
-        "SELL"
-    ]:
-
-        subset = validation_trades[
-            validation_trades["direction"] ==
-            direction
-        ]
-
-        summary = summarize(
-            subset
-        )
-
-        if summary is None:
+        if subset.empty:
             continue
 
-        print(
-            f"{direction:<5} | "
-            f"Trades={summary['trades']:3d} | "
-            f"TP={summary['tp_pct']:5.1f}% | "
-            f"SL={summary['sl_pct']:5.1f}% | "
-            f"Total={summary['total_return']*100:+.2f}% | "
-            f"Avg={summary['avg_return']*100:+.3f}%"
-        )
+        result = candidate.to_dict()
 
-    # ========================================================
-    # REGIME
-    # ========================================================
-
-    print("\n" + "=" * 70)
-    print("VALIDATION BY 1H REGIME")
-    print("=" * 70)
-
-    for regime in sorted(
-        validation_trades[
-            "regime"
-        ].unique()
-    ):
-
-        subset = validation_trades[
-            validation_trades["regime"] ==
-            regime
-        ]
-
-        summary = summarize(
+        result["validation_trades"] = len(
             subset
         )
 
-        print(
-            f"{regime:<15} | "
-            f"Trades={summary['trades']:3d} | "
-            f"Total={summary['total_return']*100:+.2f}% | "
-            f"Avg={summary['avg_return']*100:+.3f}%"
+        result["validation_avg_return"] = (
+            subset["ret60"].mean()
         )
+
+        result["validation_avg_mfe"] = (
+            subset["mfe"].mean()
+        )
+
+        result["validation_avg_mae"] = (
+            subset["mae"].mean()
+        )
+
+        result["validation_15m"] = (
+            subset["ret15"].mean()
+        )
+
+        result["validation_30m"] = (
+            subset["ret30"].mean()
+        )
+
+        result["validation_60m"] = (
+            subset["ret60"].mean()
+        )
+
+        result["validation_120m"] = (
+            subset["ret120"].mean()
+        )
+
+        result["hit_plus_03"] = (
+            subset["mfe"] >= 0.003
+        ).mean()
+
+        result["hit_plus_05"] = (
+            subset["mfe"] >= 0.005
+        ).mean()
+
+        result["bad_move_03"] = (
+            subset["mae"] <= -0.003
+        ).mean()
+
+        validation_results.append(
+            result
+        )
+
+    results = pd.DataFrame(
+        validation_results
+    )
+
+    if results.empty:
+
+        print(
+            "No selected training "
+            "conditions appeared in validation."
+        )
+
+    else:
+
+        results = results.sort_values(
+            "validation_avg_return",
+            ascending=False
+        )
+
+        print()
+
+        print(
+            results[
+                [
+                    "condition",
+                    "train_trades",
+                    "train_avg_return",
+                    "validation_trades",
+                    "validation_avg_return",
+                    "validation_avg_mfe",
+                    "validation_avg_mae",
+                    "validation_60m",
+                    "hit_plus_03",
+                    "hit_plus_05",
+                    "bad_move_03"
+                ]
+            ].to_string(
+                index=False
+            )
+        )
+
+    # ========================================================
+    # BASELINE
+    # ========================================================
+
+    print()
+    print("==========================================")
+    print("📌 BASELINE")
+    print("==========================================")
+
+    print(
+        "Validation trades:",
+        len(validation)
+    )
+
+    print(
+        "15M average:",
+        f"{validation['ret15'].mean() * 100:.3f}%"
+    )
+
+    print(
+        "30M average:",
+        f"{validation['ret30'].mean() * 100:.3f}%"
+    )
+
+    print(
+        "60M average:",
+        f"{validation['ret60'].mean() * 100:.3f}%"
+    )
+
+    print(
+        "120M average:",
+        f"{validation['ret120'].mean() * 100:.3f}%"
+    )
+
+    print(
+        "Average MFE:",
+        f"{validation['mfe'].mean() * 100:.3f}%"
+    )
+
+    print(
+        "Average MAE:",
+        f"{validation['mae'].mean() * 100:.3f}%"
+    )
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    validation_trades.to_csv(
-        "btc_dynamic_exit_validation.csv",
+    signals.to_csv(
+        "btc_signal_quality_all.csv",
         index=False
     )
 
-    print(
-        "\nSaved:"
-        " btc_dynamic_exit_validation.csv"
+    candidates.to_csv(
+        "btc_signal_quality_training.csv",
+        index=False
     )
 
-    print("\n" + "=" * 70)
-    print("✅ DYNAMIC EXIT TEST COMPLETE")
-    print("=" * 70)
+    results.to_csv(
+        "btc_signal_quality_validation.csv",
+        index=False
+    )
+
+    print()
+    print("==========================================")
+    print("💾 FILES SAVED")
+    print("==========================================")
 
     print(
-        "⚠️ Historical backtest only."
+        "btc_signal_quality_all.csv"
     )
 
     print(
-        "No live Telegram strategy was changed."
+        "btc_signal_quality_training.csv"
     )
+
+    print(
+        "btc_signal_quality_validation.csv"
+    )
+
+    print()
+    print("✅ BACKTEST COMPLETE")
+    print()
 
 
 if __name__ == "__main__":
