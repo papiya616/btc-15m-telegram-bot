@@ -11,20 +11,47 @@ from datetime import datetime, timedelta, timezone
 
 PRODUCT = "BTC-USD"
 
-GRANULARITY = 900          # 15 minutes
+GRANULARITY = 900
 DAYS = 183
 CHUNK_CANDLES = 250
 
-FORWARD_CANDLES = 12       # 3 hours
+TRAIN_DAYS = 120
+VALIDATION_DAYS = 63
+
+MAX_HOLD_CANDLES = 12       # 3 hours
+COOLDOWN_CANDLES = 12       # 3 hours
+
+ROUND_TRIP_COST = 0.0014    # 0.14%
+
+MIN_RR = 1.50
+
+# Setup variations
+PULLBACK_ATR_LEVELS = [
+    0.50,
+    0.75,
+    1.00
+]
+
+BODY_LEVELS = [
+    0.25,
+    0.40,
+    0.55
+]
+
+VOLUME_LEVELS = [
+    0.80,
+    1.00,
+    1.20
+]
 
 
 # =========================================================
-# DOWNLOAD BTC DATA
+# DOWNLOAD DATA
 # =========================================================
 
 def download_data():
 
-    print("🚀 BTC 6-Month Signal Failure Analysis Started!")
+    print("🚀 BTC High-Quality Setup Backtest Started!")
     print()
     print("📥 Downloading 6 months of BTC 15M data...")
     print()
@@ -91,6 +118,7 @@ def download_data():
             data = response.json()
 
             if isinstance(data, list):
+
                 all_candles.extend(data)
 
         except Exception as e:
@@ -141,15 +169,13 @@ def download_data():
         drop=True
     )
 
-    numeric_cols = [
+    for col in [
         "open",
         "high",
         "low",
         "close",
         "volume"
-    ]
-
-    for col in numeric_cols:
+    ]:
 
         df[col] = pd.to_numeric(
             df[col],
@@ -183,33 +209,30 @@ def download_data():
 # 15M INDICATORS
 # =========================================================
 
-def calculate_indicators(df):
+def calculate_15m(df):
 
     df = df.copy()
 
-    # -----------------------------------------------------
     # EMA
-    # -----------------------------------------------------
+    df["ema9"] = (
+        df["close"]
+        .ewm(span=9, adjust=False)
+        .mean()
+    )
 
-    df["ema9"] = df["close"].ewm(
-        span=9,
-        adjust=False
-    ).mean()
+    df["ema21"] = (
+        df["close"]
+        .ewm(span=21, adjust=False)
+        .mean()
+    )
 
-    df["ema21"] = df["close"].ewm(
-        span=21,
-        adjust=False
-    ).mean()
+    df["ema50"] = (
+        df["close"]
+        .ewm(span=50, adjust=False)
+        .mean()
+    )
 
-    df["ema50"] = df["close"].ewm(
-        span=50,
-        adjust=False
-    ).mean()
-
-    # -----------------------------------------------------
     # RSI
-    # -----------------------------------------------------
-
     delta = df["close"].diff()
 
     gain = delta.clip(
@@ -244,19 +267,18 @@ def calculate_indicators(df):
         )
     )
 
-    # -----------------------------------------------------
     # MACD
-    # -----------------------------------------------------
+    ema12 = (
+        df["close"]
+        .ewm(span=12, adjust=False)
+        .mean()
+    )
 
-    ema12 = df["close"].ewm(
-        span=12,
-        adjust=False
-    ).mean()
-
-    ema26 = df["close"].ewm(
-        span=26,
-        adjust=False
-    ).mean()
+    ema26 = (
+        df["close"]
+        .ewm(span=26, adjust=False)
+        .mean()
+    )
 
     df["macd"] = (
         ema12 -
@@ -264,10 +286,9 @@ def calculate_indicators(df):
     )
 
     df["macd_signal"] = (
-        df["macd"].ewm(
-            span=9,
-            adjust=False
-        ).mean()
+        df["macd"]
+        .ewm(span=9, adjust=False)
+        .mean()
     )
 
     df["macd_hist"] = (
@@ -275,11 +296,8 @@ def calculate_indicators(df):
         df["macd_signal"]
     )
 
-    # -----------------------------------------------------
     # ATR
-    # -----------------------------------------------------
-
-    previous_close = (
+    prev_close = (
         df["close"].shift(1)
     )
 
@@ -290,12 +308,12 @@ def calculate_indicators(df):
 
     tr2 = (
         df["high"] -
-        previous_close
+        prev_close
     ).abs()
 
     tr3 = (
         df["low"] -
-        previous_close
+        prev_close
     ).abs()
 
     true_range = pd.concat(
@@ -308,19 +326,16 @@ def calculate_indicators(df):
     ).max(axis=1)
 
     df["atr"] = (
-        true_range.rolling(
-            14
-        ).mean()
+        true_range
+        .rolling(14)
+        .mean()
     )
 
-    # -----------------------------------------------------
-    # VOLUME
-    # -----------------------------------------------------
-
+    # Volume
     volume_ma = (
-        df["volume"].rolling(
-            20
-        ).mean()
+        df["volume"]
+        .rolling(20)
+        .mean()
     )
 
     df["volume_ratio"] = (
@@ -331,10 +346,7 @@ def calculate_indicators(df):
         )
     )
 
-    # -----------------------------------------------------
-    # CANDLE BODY
-    # -----------------------------------------------------
-
+    # Candle
     df["body"] = (
         df["close"] -
         df["open"]
@@ -348,11 +360,22 @@ def calculate_indicators(df):
         )
     )
 
-    # -----------------------------------------------------
-    # EMA21 DISTANCE
-    # -----------------------------------------------------
+    # Candle range
+    df["range"] = (
+        df["high"] -
+        df["low"]
+    )
 
-    df["ema21_distance_atr"] = (
+    df["body_ratio"] = (
+        df["body"] /
+        df["range"].replace(
+            0,
+            np.nan
+        )
+    )
+
+    # Distance from EMA21
+    df["ema21_distance"] = (
         (
             df["close"] -
             df["ema21"]
@@ -371,7 +394,7 @@ def calculate_indicators(df):
 # 1H REGIME
 # =========================================================
 
-def build_1h_regime(df):
+def build_1h(df):
 
     temp = df.copy()
 
@@ -389,47 +412,34 @@ def build_1h_regime(df):
         label="right",
         closed="right"
     ).agg({
-
         "open": "first",
         "high": "max",
         "low": "min",
         "close": "last",
         "volume": "sum"
-
     })
 
     hourly = hourly.dropna()
 
     hourly = hourly.reset_index()
 
-    # -----------------------------------------------------
-    # 1H EMA
-    # -----------------------------------------------------
-
     hourly["ema20"] = (
-        hourly["close"].ewm(
-            span=20,
-            adjust=False
-        ).mean()
+        hourly["close"]
+        .ewm(span=20, adjust=False)
+        .mean()
     )
 
     hourly["ema50"] = (
-        hourly["close"].ewm(
-            span=50,
-            adjust=False
-        ).mean()
+        hourly["close"]
+        .ewm(span=50, adjust=False)
+        .mean()
     )
 
     hourly["ema100"] = (
-        hourly["close"].ewm(
-            span=100,
-            adjust=False
-        ).mean()
+        hourly["close"]
+        .ewm(span=100, adjust=False)
+        .mean()
     )
-
-    # -----------------------------------------------------
-    # Slopes
-    # -----------------------------------------------------
 
     hourly["slope20"] = (
         hourly["ema20"] -
@@ -441,11 +451,7 @@ def build_1h_regime(df):
         hourly["ema50"].shift(3)
     )
 
-    # -----------------------------------------------------
-    # Regime
-    # -----------------------------------------------------
-
-    def get_regime(row):
+    def regime(row):
 
         if (
             row["ema20"] >
@@ -488,19 +494,18 @@ def build_1h_regime(df):
         return "SIDEWAYS"
 
     hourly["regime"] = hourly.apply(
-        get_regime,
+        regime,
         axis=1
     )
 
     hourly["available_time"] = (
-        hourly["time"]
-    )
-
-    hourly["available_time"] = pd.to_datetime(
-        hourly["available_time"],
-        utc=True
-    ).astype(
-        "datetime64[ns, UTC]"
+        pd.to_datetime(
+            hourly["time"],
+            utc=True
+        )
+        .astype(
+            "datetime64[ns, UTC]"
+        )
     )
 
     return hourly[
@@ -512,319 +517,443 @@ def build_1h_regime(df):
 
 
 # =========================================================
-# MERGE REGIME
+# MERGE 1H REGIME
 # =========================================================
 
-def merge_regime(df, hourly):
+def merge_regime(
+    df,
+    hourly
+):
 
     df = df.copy()
 
-    df["time"] = pd.to_datetime(
-        df["time"],
-        utc=True
-    ).astype(
-        "datetime64[ns, UTC]"
+    df["time"] = (
+        pd.to_datetime(
+            df["time"],
+            utc=True
+        )
+        .astype(
+            "datetime64[ns, UTC]"
+        )
     )
 
     hourly = hourly.copy()
 
-    hourly["available_time"] = pd.to_datetime(
-        hourly["available_time"],
-        utc=True
-    ).astype(
-        "datetime64[ns, UTC]"
+    hourly["available_time"] = (
+        pd.to_datetime(
+            hourly["available_time"],
+            utc=True
+        )
+        .astype(
+            "datetime64[ns, UTC]"
+        )
     )
 
     df = df.sort_values(
         "time"
-    ).reset_index(
-        drop=True
     )
 
     hourly = hourly.sort_values(
         "available_time"
-    ).reset_index(
-        drop=True
     )
-
-    regime_data = hourly[
-        [
-            "available_time",
-            "regime"
-        ]
-    ].copy()
 
     df = pd.merge_asof(
         df,
-        regime_data,
+        hourly,
         left_on="time",
         right_on="available_time",
         direction="backward"
     )
 
-    if "available_time" in df.columns:
-
-        df = df.drop(
-            columns=[
-                "available_time"
-            ]
-        )
-
     df["regime"] = (
-        df["regime"].fillna(
-            "SIDEWAYS"
-        )
-    )
-
-    df["time"] = pd.to_datetime(
-        df["time"],
-        utc=True
-    )
-
-    df = df.sort_values(
-        "time"
-    ).reset_index(
-        drop=True
+        df["regime"]
+        .fillna("SIDEWAYS")
     )
 
     return df
 
 
 # =========================================================
-# BASE SIGNAL
+# HIGH QUALITY SETUP
 # =========================================================
 
-def get_base_signal(row):
+def find_setup(
+    df,
+    i,
+    pullback_atr,
+    body_min,
+    volume_min
+):
+
+    row = df.iloc[i]
+
+    # -----------------------------------------------------
+    # 1H regime
+    # -----------------------------------------------------
 
     regime = row["regime"]
 
     if regime == "SIDEWAYS":
 
-        return "WAIT"
-
-    buy_score = 0
-    sell_score = 0
+        return None
 
     # -----------------------------------------------------
-    # REGIME
+    # Basic values
     # -----------------------------------------------------
 
-    if regime in [
-        "STRONG_UP",
-        "NORMAL_UP"
-    ]:
+    close = row["close"]
+    open_price = row["open"]
+    high = row["high"]
+    low = row["low"]
 
-        buy_score += 2
+    ema9 = row["ema9"]
+    ema21 = row["ema21"]
+    ema50 = row["ema50"]
 
-    if regime in [
-        "STRONG_DOWN",
-        "NORMAL_DOWN"
-    ]:
-
-        sell_score += 2
-
-    # -----------------------------------------------------
-    # EMA
-    # -----------------------------------------------------
+    atr = row["atr"]
 
     if (
-        row["ema9"] >
-        row["ema21"] >
-        row["ema50"]
+        pd.isna(atr)
+        or atr <= 0
     ):
 
-        buy_score += 2
-
-    if (
-        row["ema9"] <
-        row["ema21"] <
-        row["ema50"]
-    ):
-
-        sell_score += 2
+        return None
 
     # -----------------------------------------------------
-    # PRICE VS EMA21
+    # BUY TREND
     # -----------------------------------------------------
 
-    if (
-        row["close"] >
-        row["ema21"]
-    ):
-
-        buy_score += 1
-
-    if (
-        row["close"] <
-        row["ema21"]
-    ):
-
-        sell_score += 1
-
-    # -----------------------------------------------------
-    # MACD
-    # -----------------------------------------------------
-
-    if row["macd_hist"] > 0:
-
-        buy_score += 2
-
-    if row["macd_hist"] < 0:
-
-        sell_score += 2
-
-    # -----------------------------------------------------
-    # RSI
-    # -----------------------------------------------------
-
-    if (
-        50 <= row["rsi"] <= 68
-    ):
-
-        buy_score += 1
-
-    if (
-        32 <= row["rsi"] <= 50
-    ):
-
-        sell_score += 1
-
-    # -----------------------------------------------------
-    # VOLUME
-    # -----------------------------------------------------
-
-    if (
-        row["volume_ratio"] >= 1.2
-    ):
-
-        if buy_score > sell_score:
-
-            buy_score += 1
-
-        elif sell_score > buy_score:
-
-            sell_score += 1
-
-    # -----------------------------------------------------
-    # CANDLE
-    # -----------------------------------------------------
-
-    if (
-        row["body_atr"] >= 0.25
-    ):
-
-        if (
-            row["close"] >
-            row["open"]
-        ):
-
-            buy_score += 1
-
-        elif (
-            row["close"] <
-            row["open"]
-        ):
-
-            sell_score += 1
-
-    # -----------------------------------------------------
-    # OVEREXTENSION
-    # -----------------------------------------------------
-
-    if (
-        row["ema21_distance_atr"] >
-        1.5
-    ):
-
-        buy_score -= 3
-        sell_score -= 3
-
-    # -----------------------------------------------------
-    # FINAL
-    # -----------------------------------------------------
-
-    if (
-        buy_score >= 6
+    bullish_trend = (
+        regime in [
+            "STRONG_UP",
+            "NORMAL_UP"
+        ]
         and
-        buy_score > sell_score
+        ema9 > ema21 > ema50
+        and
+        close > ema21
+        and
+        row["macd_hist"] > 0
+    )
+
+    # -----------------------------------------------------
+    # SELL TREND
+    # -----------------------------------------------------
+
+    bearish_trend = (
+        regime in [
+            "STRONG_DOWN",
+            "NORMAL_DOWN"
+        ]
+        and
+        ema9 < ema21 < ema50
+        and
+        close < ema21
+        and
+        row["macd_hist"] < 0
+    )
+
+    # -----------------------------------------------------
+    # Volume
+    # -----------------------------------------------------
+
+    if (
+        row["volume_ratio"] <
+        volume_min
     ):
+
+        return None
+
+    # -----------------------------------------------------
+    # Candle strength
+    # -----------------------------------------------------
+
+    if (
+        row["body_atr"] <
+        body_min
+    ):
+
+        return None
+
+    if (
+        row["body_ratio"] <
+        0.35
+    ):
+
+        return None
+
+    # =====================================================
+    # BUY SETUP
+    # =====================================================
+
+    if bullish_trend:
+
+        # Candle must close bullish
+        if close <= open_price:
+
+            return None
+
+        # RSI healthy
+        if not (
+            48 <= row["rsi"] <= 68
+        ):
+
+            return None
+
+        # Pullback to EMA21
+        distance = (
+            abs(close - ema21)
+            / atr
+        )
+
+        if distance > pullback_atr:
+
+            return None
+
+        # Not overextended
+        if (
+            distance >
+            1.5
+        ):
+
+            return None
+
+        # Recent pullback check:
+        # previous 3 candles must have
+        # touched / approached EMA21
+
+        previous = df.iloc[
+            i - 3:i
+        ]
+
+        touched_ema = (
+            (
+                previous["low"] <=
+                previous["ema21"] +
+                previous["atr"] * 0.35
+            )
+            .any()
+        )
+
+        if not touched_ema:
+
+            return None
 
         return "BUY"
 
-    if (
-        sell_score >= 6
-        and
-        sell_score > buy_score
-    ):
+    # =====================================================
+    # SELL SETUP
+    # =====================================================
+
+    if bearish_trend:
+
+        if close >= open_price:
+
+            return None
+
+        if not (
+            32 <= row["rsi"] <= 52
+        ):
+
+            return None
+
+        distance = (
+            abs(close - ema21)
+            / atr
+        )
+
+        if distance > pullback_atr:
+
+            return None
+
+        if (
+            distance >
+            1.5
+        ):
+
+            return None
+
+        previous = df.iloc[
+            i - 3:i
+        ]
+
+        touched_ema = (
+            (
+                previous["high"] >=
+                previous["ema21"] -
+                previous["atr"] * 0.35
+            )
+            .any()
+        )
+
+        if not touched_ema:
+
+            return None
 
         return "SELL"
 
-    return "WAIT"
+    return None
 
 
 # =========================================================
-# COLLECT SIGNALS
+# CONFIRMATION
 # =========================================================
 
-def collect_signals(df):
-
-    signals = []
-
-    last_signal_index = -999
-
-    for i in range(
-        120,
-        len(df) - FORWARD_CANDLES - 1
-    ):
-
-        if (
-            i -
-            last_signal_index
-        ) < 12:
-
-            continue
-
-        signal = get_base_signal(
-            df.iloc[i]
-        )
-
-        if signal in [
-            "BUY",
-            "SELL"
-        ]:
-
-            signals.append({
-                "index": i,
-                "signal": signal
-            })
-
-            last_signal_index = i
-
-    return signals
-
-
-# =========================================================
-# ANALYZE ONE SIGNAL
-# =========================================================
-
-def analyze_signal(
+def confirm_entry(
     df,
-    index,
+    signal_index,
     direction
 ):
 
-    row = df.iloc[index]
+    signal = df.iloc[
+        signal_index
+    ]
 
-    entry_price = row["close"]
+    signal_close = signal["close"]
+
+    signal_high = signal["high"]
+
+    signal_low = signal["low"]
+
+    # Wait maximum 2 candles
+    for j in range(
+        signal_index + 1,
+        signal_index + 3
+    ):
+
+        if j >= len(df):
+
+            break
+
+        candle = df.iloc[j]
+
+        # -------------------------------------------------
+        # BUY
+        # -------------------------------------------------
+
+        if direction == "BUY":
+
+            # Confirmation:
+            # close above signal high
+            if (
+                candle["close"] >
+                signal_high
+            ):
+
+                return j
+
+            # Or strong continuation
+            if (
+                candle["close"] >
+                signal_close
+                and
+                candle["close"] >
+                candle["open"]
+                and
+                candle["body_atr"] >= 0.40
+            ):
+
+                return j
+
+        # -------------------------------------------------
+        # SELL
+        # -------------------------------------------------
+
+        if direction == "SELL":
+
+            if (
+                candle["close"] <
+                signal_low
+            ):
+
+                return j
+
+            if (
+                candle["close"] <
+                signal_close
+                and
+                candle["close"] <
+                candle["open"]
+                and
+                candle["body_atr"] >= 0.40
+            ):
+
+                return j
+
+    return None
+
+
+# =========================================================
+# TRADE SIMULATION
+# =========================================================
+
+def simulate_trade(
+    df,
+    entry_index,
+    direction
+):
+
+    entry = df.iloc[
+        entry_index
+    ]
+
+    entry_price = (
+        entry["close"]
+    )
+
+    atr = entry["atr"]
+
+    if (
+        pd.isna(atr)
+        or atr <= 0
+    ):
+
+        return None
+
+    # -----------------------------------------------------
+    # Dynamic risk
+    # -----------------------------------------------------
+
+    risk = atr
+
+    # TP at 1.5R
+    reward = (
+        risk *
+        MIN_RR
+    )
+
+    if direction == "BUY":
+
+        stop_price = (
+            entry_price -
+            risk
+        )
+
+        target_price = (
+            entry_price +
+            reward
+        )
+
+    else:
+
+        stop_price = (
+            entry_price +
+            risk
+        )
+
+        target_price = (
+            entry_price -
+            reward
+        )
 
     end_index = min(
-        index +
-        FORWARD_CANDLES,
+        entry_index +
+        MAX_HOLD_CANDLES,
         len(df) - 1
     )
 
     future = df.iloc[
-        index + 1:
+        entry_index + 1:
         end_index + 1
     ]
 
@@ -832,730 +961,463 @@ def analyze_signal(
 
         return None
 
-    # -----------------------------------------------------
-    # Forward returns
-    # -----------------------------------------------------
+    mfe_values = []
 
-    returns = {}
+    mae_values = []
 
-    for minutes in [
-        15,
-        30,
-        60,
-        120,
-        180
-    ]:
+    outcome = "TIMEOUT"
 
-        candles = (
-            minutes // 15
-        )
+    exit_price = (
+        future.iloc[-1]["close"]
+    )
 
-        target_index = (
-            index +
-            candles
-        )
+    exit_index = (
+        future.index[-1]
+    )
 
-        if (
-            target_index <
-            len(df)
-        ):
+    for idx, candle in future.iterrows():
 
-            future_price = (
-                df.iloc[
-                    target_index
-                ]["close"]
+        if direction == "BUY":
+
+            favorable = (
+                candle["high"] -
+                entry_price
+            ) / entry_price
+
+            adverse = (
+                candle["low"] -
+                entry_price
+            ) / entry_price
+
+            mfe_values.append(
+                favorable
             )
 
-            if direction == "BUY":
+            mae_values.append(
+                adverse
+            )
 
-                ret = (
-                    future_price -
-                    entry_price
-                ) / entry_price
+            hit_stop = (
+                candle["low"] <=
+                stop_price
+            )
 
-            else:
+            hit_target = (
+                candle["high"] >=
+                target_price
+            )
 
-                ret = (
-                    entry_price -
-                    future_price
-                ) / entry_price
+            # Conservative:
+            # if both happen same candle,
+            # assume stop first.
 
-            # Cost-adjusted
-            ret -= 0.0014
+            if hit_stop:
 
-            returns[
-                f"return_{minutes}"
-            ] = ret
+                outcome = "SL"
+
+                exit_price = (
+                    stop_price
+                )
+
+                exit_index = idx
+
+                break
+
+            if hit_target:
+
+                outcome = "TP"
+
+                exit_price = (
+                    target_price
+                )
+
+                exit_index = idx
+
+                break
 
         else:
 
-            returns[
-                f"return_{minutes}"
-            ] = np.nan
+            favorable = (
+                entry_price -
+                candle["low"]
+            ) / entry_price
+
+            adverse = (
+                entry_price -
+                candle["high"]
+            ) / entry_price
+
+            mfe_values.append(
+                favorable
+            )
+
+            mae_values.append(
+                adverse
+            )
+
+            hit_stop = (
+                candle["high"] >=
+                stop_price
+            )
+
+            hit_target = (
+                candle["low"] <=
+                target_price
+            )
+
+            if hit_stop:
+
+                outcome = "SL"
+
+                exit_price = (
+                    stop_price
+                )
+
+                exit_index = idx
+
+                break
+
+            if hit_target:
+
+                outcome = "TP"
+
+                exit_price = (
+                    target_price
+                )
+
+                exit_index = idx
+
+                break
 
     # -----------------------------------------------------
-    # MFE / MAE
+    # Return
     # -----------------------------------------------------
 
     if direction == "BUY":
 
-        favorable_moves = (
-            future["high"] -
-            entry_price
-        ) / entry_price
-
-        adverse_moves = (
-            future["low"] -
+        gross_return = (
+            exit_price -
             entry_price
         ) / entry_price
 
     else:
 
-        favorable_moves = (
+        gross_return = (
             entry_price -
-            future["low"]
+            exit_price
         ) / entry_price
 
-        adverse_moves = (
-            entry_price -
-            future["high"]
-        ) / entry_price
-
-    mfe = favorable_moves.max()
-
-    mae = adverse_moves.min()
-
-    # -----------------------------------------------------
-    # Thresholds
-    # -----------------------------------------------------
-
-    if direction == "BUY":
-
-        plus_020 = (
-            favorable_moves >= 0.002
-        ).any()
-
-        plus_030 = (
-            favorable_moves >= 0.003
-        ).any()
-
-        plus_050 = (
-            favorable_moves >= 0.005
-        ).any()
-
-        plus_075 = (
-            favorable_moves >= 0.0075
-        ).any()
-
-        plus_100 = (
-            favorable_moves >= 0.010
-        ).any()
-
-        minus_020 = (
-            adverse_moves <= -0.002
-        ).any()
-
-        minus_030 = (
-            adverse_moves <= -0.003
-        ).any()
-
-        minus_050 = (
-            adverse_moves <= -0.005
-        ).any()
-
-    else:
-
-        plus_020 = (
-            favorable_moves >= 0.002
-        ).any()
-
-        plus_030 = (
-            favorable_moves >= 0.003
-        ).any()
-
-        plus_050 = (
-            favorable_moves >= 0.005
-        ).any()
-
-        plus_075 = (
-            favorable_moves >= 0.0075
-        ).any()
-
-        plus_100 = (
-            favorable_moves >= 0.010
-        ).any()
-
-        minus_020 = (
-            adverse_moves <= -0.002
-        ).any()
-
-        minus_030 = (
-            adverse_moves <= -0.003
-        ).any()
-
-        minus_050 = (
-            adverse_moves <= -0.005
-        ).any()
-
-    # -----------------------------------------------------
-    # Condition buckets
-    # -----------------------------------------------------
-
-    rsi = row["rsi"]
-
-    if rsi < 35:
-
-        rsi_bucket = "RSI_LT35"
-
-    elif rsi < 45:
-
-        rsi_bucket = "RSI_35_45"
-
-    elif rsi < 55:
-
-        rsi_bucket = "RSI_45_55"
-
-    elif rsi < 65:
-
-        rsi_bucket = "RSI_55_65"
-
-    else:
-
-        rsi_bucket = "RSI_GT65"
-
-    volume = row["volume_ratio"]
-
-    if volume < 0.8:
-
-        volume_bucket = "VOL_LT08"
-
-    elif volume <= 1.2:
-
-        volume_bucket = "VOL_08_12"
-
-    else:
-
-        volume_bucket = "VOL_GT12"
-
-    distance = row[
-        "ema21_distance_atr"
-    ]
-
-    if distance < 0.25:
-
-        distance_bucket = "DIST_LT025"
-
-    elif distance < 0.50:
-
-        distance_bucket = "DIST_025_050"
-
-    elif distance <= 1.0:
-
-        distance_bucket = "DIST_050_100"
-
-    else:
-
-        distance_bucket = "DIST_GT100"
-
-    body = row["body_atr"]
-
-    if body < 0.25:
-
-        body_bucket = "BODY_LT025"
-
-    elif body < 0.50:
-
-        body_bucket = "BODY_025_050"
-
-    else:
-
-        body_bucket = "BODY_GT050"
-
-    if row["ema9"] > row["ema21"] > row["ema50"]:
-
-        ema_alignment = "EMA_UP"
-
-    elif row["ema9"] < row["ema21"] < row["ema50"]:
-
-        ema_alignment = "EMA_DOWN"
-
-    else:
-
-        ema_alignment = "EMA_MIXED"
-
-    macd_state = (
-        "MACD_UP"
-        if row["macd_hist"] > 0
-        else
-        "MACD_DOWN"
+    net_return = (
+        gross_return -
+        ROUND_TRIP_COST
     )
 
-    return {
+    # -----------------------------------------------------
+    # R
+    # -----------------------------------------------------
 
-        "time":
-            row["time"],
+    risk_pct = (
+        risk /
+        entry_price
+    )
+
+    if risk_pct > 0:
+
+        r_value = (
+            net_return /
+            risk_pct
+        )
+
+    else:
+
+        r_value = 0
+
+    return {
 
         "direction":
             direction,
 
-        "regime":
-            row["regime"],
+        "entry_time":
+            entry["time"],
 
-        "rsi_bucket":
-            rsi_bucket,
+        "entry_price":
+            entry_price,
 
-        "volume_bucket":
-            volume_bucket,
+        "exit_time":
+            df.loc[
+                exit_index,
+                "time"
+            ],
 
-        "distance_bucket":
-            distance_bucket,
+        "outcome":
+            outcome,
 
-        "body_bucket":
-            body_bucket,
+        "gross_return":
+            gross_return,
 
-        "ema_alignment":
-            ema_alignment,
+        "net_return":
+            net_return,
 
-        "macd_state":
-            macd_state,
-
-        "rsi":
-            rsi,
-
-        "volume_ratio":
-            volume,
-
-        "ema_distance_atr":
-            distance,
-
-        "body_atr":
-            body,
+        "r":
+            r_value,
 
         "mfe":
-            mfe,
+            max(
+                mfe_values
+            ) if mfe_values else 0,
 
         "mae":
-            mae,
+            min(
+                mae_values
+            ) if mae_values else 0,
 
-        "plus_020":
-            plus_020,
-
-        "plus_030":
-            plus_030,
-
-        "plus_050":
-            plus_050,
-
-        "plus_075":
-            plus_075,
-
-        "plus_100":
-            plus_100,
-
-        "minus_020":
-            minus_020,
-
-        "minus_030":
-            minus_030,
-
-        "minus_050":
-            minus_050,
-
-        **returns
+        "regime":
+            entry["regime"]
     }
 
 
 # =========================================================
-# BUILD ANALYSIS DATA
+# RUN ONE CONFIG
 # =========================================================
 
-def build_analysis(df):
+def run_config(
+    df,
+    start_time,
+    end_time,
+    pullback_atr,
+    body_min,
+    volume_min
+):
 
-    signals = collect_signals(
-        df
-    )
+    trades = []
 
-    print()
-    print(
-        f"Base signals: "
-        f"{len(signals):,}"
-    )
+    last_trade_index = -999
 
-    rows = []
-
-    for n, signal in enumerate(
-        signals
+    for i in range(
+        120,
+        len(df) -
+        MAX_HOLD_CANDLES -
+        3
     ):
 
-        result = analyze_signal(
+        current_time = (
+            df.iloc[i]["time"]
+        )
+
+        if (
+            current_time <
+            start_time
+        ):
+
+            continue
+
+        if (
+            current_time >
+            end_time
+        ):
+
+            break
+
+        if (
+            i -
+            last_trade_index
+        ) < COOLDOWN_CANDLES:
+
+            continue
+
+        direction = find_setup(
             df,
-            signal["index"],
-            signal["signal"]
+            i,
+            pullback_atr,
+            body_min,
+            volume_min
         )
 
-        if result is not None:
+        if direction is None:
 
-            rows.append(
-                result
-            )
+            continue
 
-    analysis = pd.DataFrame(
-        rows
-    )
-
-    return analysis
-
-
-# =========================================================
-# SUMMARY
-# =========================================================
-
-def print_overall(
-    analysis
-):
-
-    print()
-    print("=" * 80)
-    print(
-        "OVERALL MARKET MOVEMENT AFTER SIGNAL"
-    )
-    print("=" * 80)
-
-    print(
-        f"Observations: "
-        f"{len(analysis):,}"
-    )
-
-    for minutes in [
-        15,
-        30,
-        60,
-        120,
-        180
-    ]:
-
-        col = (
-            f"return_{minutes}"
-        )
-
-        avg = (
-            analysis[col].mean()
-        )
-
-        up = (
-            analysis[col] > 0
-        ).mean()
-
-        down = (
-            analysis[col] < 0
-        ).mean()
-
-        print(
-            f"{minutes}M | "
-            f"Avg Return "
-            f"{avg * 100:.3f}% | "
-            f"UP "
-            f"{up * 100:.1f}% | "
-            f"DOWN "
-            f"{down * 100:.1f}%"
-        )
-
-    print()
-    print(
-        f"Average MFE: "
-        f"{analysis['mfe'].mean() * 100:.3f}%"
-    )
-
-    print(
-        f"Average MAE: "
-        f"{analysis['mae'].mean() * 100:.3f}%"
-    )
-
-    print()
-
-    for col, label in [
-        ("plus_020", "+0.20%"),
-        ("plus_030", "+0.30%"),
-        ("plus_050", "+0.50%"),
-        ("plus_075", "+0.75%"),
-        ("plus_100", "+1.00%")
-    ]:
-
-        print(
-            f"Favorable {label}: "
-            f"{analysis[col].mean() * 100:.1f}%"
-        )
-
-    print()
-
-    for col, label in [
-        ("minus_020", "-0.20%"),
-        ("minus_030", "-0.30%"),
-        ("minus_050", "-0.50%")
-    ]:
-
-        print(
-            f"Adverse {label}: "
-            f"{analysis[col].mean() * 100:.1f}%"
-        )
-
-
-# =========================================================
-# GROUP ANALYSIS
-# =========================================================
-
-def group_analysis(
-    analysis,
-    column,
-    title
-):
-
-    print()
-    print("=" * 80)
-    print(title)
-    print("=" * 80)
-
-    grouped = (
-        analysis
-        .groupby(column)
-        .agg(
-
-            count=(
-                column,
-                "size"
-            ),
-
-            avg_60m=(
-                "return_60",
-                "mean"
-            ),
-
-            avg_120m=(
-                "return_120",
-                "mean"
-            ),
-
-            avg_180m=(
-                "return_180",
-                "mean"
-            ),
-
-            avg_mfe=(
-                "mfe",
-                "mean"
-            ),
-
-            avg_mae=(
-                "mae",
-                "mean"
-            ),
-
-            favorable_030=(
-                "plus_030",
-                "mean"
-            ),
-
-            favorable_050=(
-                "plus_050",
-                "mean"
-            ),
-
-            favorable_075=(
-                "plus_075",
-                "mean"
-            ),
-
-            adverse_030=(
-                "minus_030",
-                "mean"
-            ),
-
-            adverse_050=(
-                "minus_050",
-                "mean"
-            )
-        )
-        .sort_values(
-            "count",
-            ascending=False
-        )
-    )
-
-    for idx, row in grouped.iterrows():
-
-        print(
-            f"{idx} | "
-            f"N={int(row['count'])} | "
-            f"60M={row['avg_60m'] * 100:.3f}% | "
-            f"120M={row['avg_120m'] * 100:.3f}% | "
-            f"180M={row['avg_180m'] * 100:.3f}% | "
-            f"MFE={row['avg_mfe'] * 100:.3f}% | "
-            f"MAE={row['avg_mae'] * 100:.3f}% | "
-            f"+0.3={row['favorable_030'] * 100:.1f}% | "
-            f"+0.5={row['favorable_050'] * 100:.1f}% | "
-            f"+0.75={row['favorable_075'] * 100:.1f}% | "
-            f"-0.3={row['adverse_030'] * 100:.1f}% | "
-            f"-0.5={row['adverse_050'] * 100:.1f}%"
-        )
-
-
-# =========================================================
-# DIRECTION + CONDITION ANALYSIS
-# =========================================================
-
-def direction_analysis(
-    analysis
-):
-
-    print()
-    print("=" * 80)
-    print(
-        "BUY VS SELL"
-    )
-    print("=" * 80)
-
-    for direction in [
-        "BUY",
-        "SELL"
-    ]:
-
-        subset = analysis[
-            analysis["direction"] ==
+        entry_index = confirm_entry(
+            df,
+            i,
             direction
-        ]
+        )
 
-        if subset.empty:
+        if entry_index is None:
 
             continue
 
-        print()
-
-        print(
-            f"{direction} | "
-            f"N={len(subset)} | "
-            f"15M={subset['return_15'].mean() * 100:.3f}% | "
-            f"30M={subset['return_30'].mean() * 100:.3f}% | "
-            f"60M={subset['return_60'].mean() * 100:.3f}% | "
-            f"120M={subset['return_120'].mean() * 100:.3f}% | "
-            f"180M={subset['return_180'].mean() * 100:.3f}% | "
-            f"MFE={subset['mfe'].mean() * 100:.3f}% | "
-            f"MAE={subset['mae'].mean() * 100:.3f}%"
+        entry_time = (
+            df.iloc[
+                entry_index
+            ]["time"]
         )
 
+        if (
+            entry_time <
+            start_time
+        ):
+
+            continue
+
+        if (
+            entry_time >
+            end_time
+        ):
+
+            continue
+
+        trade = simulate_trade(
+            df,
+            entry_index,
+            direction
+        )
+
+        if trade is not None:
+
+            trades.append(
+                trade
+            )
+
+            last_trade_index = (
+                entry_index
+            )
+
+    return trades
+
 
 # =========================================================
-# CONDITIONAL COMBINATIONS
+# STATISTICS
 # =========================================================
 
-def conditional_analysis(
-    analysis
+def stats(
+    trades
 ):
 
-    print()
-    print("=" * 80)
-    print(
-        "IMPORTANT CONDITION COMBINATIONS"
+    if not trades:
+
+        return None
+
+    data = pd.DataFrame(
+        trades
     )
-    print("=" * 80)
 
-    conditions = [
+    total = len(data)
 
-        (
-            "STRONG_UP + EMA_UP",
-            (
-                (analysis["regime"] == "STRONG_UP")
-                &
-                (analysis["ema_alignment"] == "EMA_UP")
-            )
-        ),
+    tp = (
+        data["outcome"] ==
+        "TP"
+    ).sum()
 
-        (
-            "STRONG_DOWN + EMA_DOWN",
-            (
-                (analysis["regime"] == "STRONG_DOWN")
-                &
-                (analysis["ema_alignment"] == "EMA_DOWN")
-            )
-        ),
+    sl = (
+        data["outcome"] ==
+        "SL"
+    ).sum()
 
-        (
-            "STRONG_UP + MACD_UP",
-            (
-                (analysis["regime"] == "STRONG_UP")
-                &
-                (analysis["macd_state"] == "MACD_UP")
-            )
-        ),
+    timeout = (
+        data["outcome"] ==
+        "TIMEOUT"
+    ).sum()
 
-        (
-            "STRONG_DOWN + MACD_DOWN",
-            (
-                (analysis["regime"] == "STRONG_DOWN")
-                &
-                (analysis["macd_state"] == "MACD_DOWN")
-            )
-        ),
+    total_return = (
+        data["net_return"]
+        .sum()
+    )
 
-        (
-            "HIGH_VOLUME + EMA_UP",
-            (
-                (analysis["volume_bucket"] == "VOL_GT12")
-                &
-                (analysis["ema_alignment"] == "EMA_UP")
-            )
-        ),
+    avg_return = (
+        data["net_return"]
+        .mean()
+    )
 
-        (
-            "HIGH_VOLUME + EMA_DOWN",
-            (
-                (analysis["volume_bucket"] == "VOL_GT12")
-                &
-                (analysis["ema_alignment"] == "EMA_DOWN")
-            )
-        ),
+    total_r = (
+        data["r"].sum()
+    )
 
-        (
-            "RSI_LOW + MACD_DOWN",
-            (
-                (analysis["rsi_bucket"] == "RSI_LT35")
-                &
-                (analysis["macd_state"] == "MACD_DOWN")
-            )
-        ),
+    avg_r = (
+        data["r"].mean()
+    )
 
-        (
-            "RSI_HIGH + MACD_UP",
-            (
-                (analysis["rsi_bucket"] == "RSI_GT65")
-                &
-                (analysis["macd_state"] == "MACD_UP")
-            )
-        )
-    ]
+    avg_mfe = (
+        data["mfe"].mean()
+    )
 
-    for name, mask in conditions:
+    avg_mae = (
+        data["mae"].mean()
+    )
 
-        subset = analysis[
-            mask
-        ]
+    return {
 
-        if len(subset) < 20:
+        "trades":
+            total,
 
-            continue
+        "tp":
+            tp,
 
-        print()
+        "sl":
+            sl,
+
+        "timeout":
+            timeout,
+
+        "tp_pct":
+            tp / total,
+
+        "sl_pct":
+            sl / total,
+
+        "timeout_pct":
+            timeout / total,
+
+        "total_return":
+            total_return,
+
+        "avg_return":
+            avg_return,
+
+        "total_r":
+            total_r,
+
+        "avg_r":
+            avg_r,
+
+        "avg_mfe":
+            avg_mfe,
+
+        "avg_mae":
+            avg_mae
+    }
+
+
+# =========================================================
+# PRINT STATS
+# =========================================================
+
+def print_stats(
+    name,
+    result
+):
+
+    if result is None:
 
         print(
-            f"{name} | "
-            f"N={len(subset)} | "
-            f"60M={subset['return_60'].mean() * 100:.3f}% | "
-            f"120M={subset['return_120'].mean() * 100:.3f}% | "
-            f"180M={subset['return_180'].mean() * 100:.3f}% | "
-            f"MFE={subset['mfe'].mean() * 100:.3f}% | "
-            f"MAE={subset['mae'].mean() * 100:.3f}% | "
-            f"+0.5={subset['plus_050'].mean() * 100:.1f}% | "
-            f"-0.3={subset['minus_030'].mean() * 100:.1f}%"
+            f"{name}: NO TRADES"
         )
+
+        return
+
+    print(
+        f"{name} | "
+        f"Trades={result['trades']} | "
+        f"TP={result['tp_pct'] * 100:.1f}% | "
+        f"SL={result['sl_pct'] * 100:.1f}% | "
+        f"Timeout={result['timeout_pct'] * 100:.1f}% | "
+        f"Return={result['total_return'] * 100:.2f}% | "
+        f"Avg={result['avg_return'] * 100:.3f}% | "
+        f"TotalR={result['total_r']:.2f} | "
+        f"AvgR={result['avg_r']:.3f} | "
+        f"MFE={result['avg_mfe'] * 100:.3f}% | "
+        f"MAE={result['avg_mae'] * 100:.3f}%"
+    )
 
 
 # =========================================================
@@ -1564,43 +1426,29 @@ def conditional_analysis(
 
 def main():
 
-    # -----------------------------------------------------
-    # Download
-    # -----------------------------------------------------
-
     df = download_data()
 
-    # -----------------------------------------------------
-    # Indicators
-    # -----------------------------------------------------
+    print()
+    print("📊 Calculating 15M indicators...")
 
-    df = calculate_indicators(
+    df = calculate_15m(
         df
     )
 
-    # -----------------------------------------------------
-    # 1H regime
-    # -----------------------------------------------------
-
-    hourly = build_1h_regime(
-        df
+    print(
+        "📊 Building completed 1H regime..."
     )
 
-    # -----------------------------------------------------
-    # Merge
-    # -----------------------------------------------------
+    hourly = build_1h(
+        df
+    )
 
     df = merge_regime(
         df,
         hourly
     )
 
-    # -----------------------------------------------------
-    # Clean
-    # -----------------------------------------------------
-
     required = [
-
         "ema9",
         "ema21",
         "ema50",
@@ -1609,7 +1457,8 @@ def main():
         "atr",
         "volume_ratio",
         "body_atr",
-        "ema21_distance_atr"
+        "body_ratio",
+        "ema21_distance"
     ]
 
     df = df.dropna(
@@ -1625,142 +1474,224 @@ def main():
     )
 
     # -----------------------------------------------------
-    # Build analysis
+    # Time periods
     # -----------------------------------------------------
 
-    print()
-    print(
-        "📊 Analyzing signal behavior..."
+    data_start = (
+        df["time"].iloc[0]
     )
 
-    analysis = build_analysis(
-        df
+    data_end = (
+        df["time"].iloc[-1]
     )
 
-    if analysis.empty:
-
-        print(
-            "❌ No analysis observations."
+    validation_start = (
+        data_end -
+        timedelta(
+            days=VALIDATION_DAYS
         )
-
-        return
-
-    # -----------------------------------------------------
-    # Overall
-    # -----------------------------------------------------
-
-    print_overall(
-        analysis
     )
 
-    # -----------------------------------------------------
-    # Direction
-    # -----------------------------------------------------
-
-    direction_analysis(
-        analysis
-    )
-
-    # -----------------------------------------------------
-    # 1H regime
-    # -----------------------------------------------------
-
-    group_analysis(
-        analysis,
-        "regime",
-        "1H MARKET REGIME"
-    )
-
-    # -----------------------------------------------------
-    # EMA
-    # -----------------------------------------------------
-
-    group_analysis(
-        analysis,
-        "ema_alignment",
-        "15M EMA ALIGNMENT"
-    )
-
-    # -----------------------------------------------------
-    # RSI
-    # -----------------------------------------------------
-
-    group_analysis(
-        analysis,
-        "rsi_bucket",
-        "RSI CONDITIONS"
-    )
-
-    # -----------------------------------------------------
-    # MACD
-    # -----------------------------------------------------
-
-    group_analysis(
-        analysis,
-        "macd_state",
-        "MACD CONDITIONS"
-    )
-
-    # -----------------------------------------------------
-    # Volume
-    # -----------------------------------------------------
-
-    group_analysis(
-        analysis,
-        "volume_bucket",
-        "VOLUME CONDITIONS"
-    )
-
-    # -----------------------------------------------------
-    # EMA distance
-    # -----------------------------------------------------
-
-    group_analysis(
-        analysis,
-        "distance_bucket",
-        "DISTANCE FROM EMA21"
-    )
-
-    # -----------------------------------------------------
-    # Candle
-    # -----------------------------------------------------
-
-    group_analysis(
-        analysis,
-        "body_bucket",
-        "CANDLE STRENGTH"
-    )
-
-    # -----------------------------------------------------
-    # Combinations
-    # -----------------------------------------------------
-
-    conditional_analysis(
-        analysis
-    )
-
-    # -----------------------------------------------------
-    # SAVE FULL CSV
-    # -----------------------------------------------------
-
-    analysis.to_csv(
-        "btc_signal_failure_analysis.csv",
-        index=False
+    training_start = (
+        validation_start -
+        timedelta(
+            days=TRAIN_DAYS
+        )
     )
 
     print()
     print(
-        "💾 Saved:"
+        f"Training: "
+        f"{training_start} "
+        f"→ "
+        f"{validation_start}"
     )
 
     print(
-        "btc_signal_failure_analysis.csv"
+        f"Validation: "
+        f"{validation_start} "
+        f"→ "
+        f"{data_end}"
     )
+
+    # -----------------------------------------------------
+    # TRAINING CONFIGS
+    # -----------------------------------------------------
 
     print()
     print("=" * 80)
     print(
-        "✅ SIGNAL FAILURE ANALYSIS COMPLETE"
+        "TRAINING HIGH-QUALITY SETUPS"
+    )
+    print("=" * 80)
+
+    configs = []
+
+    for pullback in PULLBACK_ATR_LEVELS:
+
+        for body in BODY_LEVELS:
+
+            for volume in VOLUME_LEVELS:
+
+                trades = run_config(
+                    df,
+                    training_start,
+                    validation_start,
+                    pullback,
+                    body,
+                    volume
+                )
+
+                result = stats(
+                    trades
+                )
+
+                name = (
+                    f"PB{pullback:.2f}"
+                    f"_BODY{body:.2f}"
+                    f"_VOL{volume:.2f}"
+                )
+
+                print_stats(
+                    name,
+                    result
+                )
+
+                if (
+                    result is not None
+                    and
+                    result["trades"] >= 20
+                    and
+                    result["avg_return"] > 0
+                    and
+                    result["avg_r"] > 0
+                ):
+
+                    configs.append({
+                        "name": name,
+                        "pullback": pullback,
+                        "body": body,
+                        "volume": volume,
+                        "result": result
+                    })
+
+    # -----------------------------------------------------
+    # Positive configs
+    # -----------------------------------------------------
+
+    print()
+    print("=" * 80)
+    print(
+        "POSITIVE TRAINING CONFIGURATIONS"
+    )
+    print("=" * 80)
+
+    if not configs:
+
+        print(
+            "❌ No positive training configuration."
+        )
+
+        print()
+        print(
+            "The setup did not demonstrate "
+            "a positive edge in training."
+        )
+
+        return
+
+    configs = sorted(
+        configs,
+        key=lambda x:
+        x["result"]["avg_r"],
+        reverse=True
+    )
+
+    for config in configs:
+
+        result = (
+            config["result"]
+        )
+
+        print(
+            f"{config['name']} | "
+            f"Trades={result['trades']} | "
+            f"AvgR={result['avg_r']:.3f} | "
+            f"Return={result['avg_return'] * 100:.3f}%"
+        )
+
+    # -----------------------------------------------------
+    # VALIDATION
+    # -----------------------------------------------------
+
+    print()
+    print("=" * 80)
+    print(
+        "UNSEEN VALIDATION"
+    )
+    print("=" * 80)
+
+    validation_rows = []
+
+    for config in configs:
+
+        trades = run_config(
+            df,
+            validation_start,
+            data_end,
+            config["pullback"],
+            config["body"],
+            config["volume"]
+        )
+
+        result = stats(
+            trades
+        )
+
+        print_stats(
+            config["name"],
+            result
+        )
+
+        if result is not None:
+
+            row = {
+                "config":
+                    config["name"],
+
+                **result
+            }
+
+            validation_rows.append(
+                row
+            )
+
+    # -----------------------------------------------------
+    # SAVE
+    # -----------------------------------------------------
+
+    if validation_rows:
+
+        pd.DataFrame(
+            validation_rows
+        ).to_csv(
+            "btc_high_quality_validation.csv",
+            index=False
+        )
+
+        print()
+        print(
+            "💾 Saved:"
+        )
+
+        print(
+            "btc_high_quality_validation.csv"
+        )
+
+    print()
+    print("=" * 80)
+    print(
+        "✅ HIGH-QUALITY SETUP BACKTEST COMPLETE"
     )
     print("=" * 80)
 
