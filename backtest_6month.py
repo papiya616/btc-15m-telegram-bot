@@ -4,17 +4,19 @@ import numpy as np
 import time
 from datetime import datetime, timedelta, timezone
 
+
 # =========================================================
 # SETTINGS
 # =========================================================
 
 PRODUCT = "BTC-USD"
+
 GRANULARITY = 900          # 15 minutes
 DAYS = 183
 CHUNK_CANDLES = 250
 
-TRAIN_DAYS = 120           # ~4 months
-VALIDATION_DAYS = 63        # ~2 months
+TRAIN_DAYS = 120           # approximately 4 months
+VALIDATION_DAYS = 63        # approximately 2 months
 
 COOLDOWN_CANDLES = 12      # 3 hours
 EVAL_CANDLES = 12          # 3 hours
@@ -23,12 +25,19 @@ ROUND_TRIP_COST = 0.0014   # 0.14%
 
 MIN_TRAIN_TRADES = 30
 
-# Confirmation tests
+
+# =========================================================
+# CONFIRMATION CONFIGURATIONS
+# =========================================================
+
 CONFIRM_CONFIGS = [
+
+    # Next candle / 2 candles / 3 candles
     ("CLOSE_1", 1, "close"),
     ("CLOSE_2", 2, "close"),
     ("CLOSE_3", 3, "close"),
 
+    # Break signal candle high/low
     ("BREAK_005_1", 1, "break_005"),
     ("BREAK_005_2", 2, "break_005"),
     ("BREAK_005_3", 3, "break_005"),
@@ -42,18 +51,24 @@ CONFIRM_CONFIGS = [
     ("BREAK_015_3", 3, "break_015"),
 ]
 
+
 # =========================================================
-# DOWNLOAD DATA
+# DOWNLOAD BTC DATA
 # =========================================================
 
 def download_data():
+
     print("🚀 BTC 6-Month Confirmation Backtest Started!")
     print()
     print("📥 Downloading 6 months of BTC 15M data...")
     print()
 
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=DAYS)
+
+    start_time = (
+        end_time -
+        timedelta(days=DAYS)
+    )
 
     all_candles = []
 
@@ -63,12 +78,21 @@ def download_data():
 
         current_end = min(
             current_start +
-            timedelta(seconds=GRANULARITY * (CHUNK_CANDLES - 1)),
+            timedelta(
+                seconds=
+                GRANULARITY *
+                (CHUNK_CANDLES - 1)
+            ),
             end_time
         )
 
-        start_epoch = int(current_start.timestamp())
-        end_epoch = int(current_end.timestamp())
+        start_epoch = int(
+            current_start.timestamp()
+        )
+
+        end_epoch = int(
+            current_end.timestamp()
+        )
 
         print(
             f"Downloading: "
@@ -77,7 +101,10 @@ def download_data():
             f"{current_end.strftime('%Y-%m-%d %H:%M')}"
         )
 
-        url = f"https://api.exchange.coinbase.com/products/{PRODUCT}/candles"
+        url = (
+            f"https://api.exchange.coinbase.com/"
+            f"products/{PRODUCT}/candles"
+        )
 
         params = {
             "granularity": GRANULARITY,
@@ -86,6 +113,7 @@ def download_data():
         }
 
         try:
+
             response = requests.get(
                 url,
                 params=params,
@@ -100,14 +128,24 @@ def download_data():
                 all_candles.extend(data)
 
         except Exception as e:
-            print("Download error:", e)
 
-        current_start = current_end + timedelta(seconds=GRANULARITY)
+            print(
+                "Download error:",
+                e
+            )
+
+        current_start = (
+            current_end +
+            timedelta(seconds=GRANULARITY)
+        )
 
         time.sleep(0.25)
 
     if not all_candles:
-        raise RuntimeError("No BTC data downloaded.")
+
+        raise RuntimeError(
+            "No BTC data downloaded."
+        )
 
     df = pd.DataFrame(
         all_candles,
@@ -121,16 +159,26 @@ def download_data():
         ]
     )
 
-    df = df.drop_duplicates(subset=["timestamp"])
+    # Remove duplicates
+    df = df.drop_duplicates(
+        subset=["timestamp"]
+    )
 
+    # Timestamp
     df["time"] = pd.to_datetime(
         df["timestamp"],
         unit="s",
         utc=True
     )
 
-    df = df.sort_values("time").reset_index(drop=True)
+    # Sort
+    df = df.sort_values(
+        "time"
+    ).reset_index(
+        drop=True
+    )
 
+    # Numeric columns
     numeric_cols = [
         "open",
         "high",
@@ -140,15 +188,21 @@ def download_data():
     ]
 
     for col in numeric_cols:
+
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce"
         )
 
-    df = df.dropna().reset_index(drop=True)
+    df = df.dropna().reset_index(
+        drop=True
+    )
 
     print()
-    print(f"✅ Total candles downloaded: {len(df):,}")
+    print(
+        f"✅ Total candles downloaded: "
+        f"{len(df):,}"
+    )
 
     print(
         f"First candle: "
@@ -164,14 +218,17 @@ def download_data():
 
 
 # =========================================================
-# INDICATORS
+# 15M INDICATORS
 # =========================================================
 
 def calculate_indicators(df):
 
     df = df.copy()
 
+    # -----------------------------------------------------
     # EMA
+    # -----------------------------------------------------
+
     df["ema9"] = df["close"].ewm(
         span=9,
         adjust=False
@@ -187,22 +244,48 @@ def calculate_indicators(df):
         adjust=False
     ).mean()
 
+    # -----------------------------------------------------
     # RSI
+    # -----------------------------------------------------
+
     delta = df["close"].diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-
-    df["rsi"] = 100 - (
-        100 / (1 + rs)
+    gain = delta.clip(
+        lower=0
     )
 
+    loss = -delta.clip(
+        upper=0
+    )
+
+    avg_gain = gain.rolling(
+        14
+    ).mean()
+
+    avg_loss = loss.rolling(
+        14
+    ).mean()
+
+    rs = (
+        avg_gain /
+        avg_loss.replace(
+            0,
+            np.nan
+        )
+    )
+
+    df["rsi"] = (
+        100 -
+        (
+            100 /
+            (1 + rs)
+        )
+    )
+
+    # -----------------------------------------------------
     # MACD
+    # -----------------------------------------------------
+
     ema12 = df["close"].ewm(
         span=12,
         adjust=False
@@ -213,49 +296,83 @@ def calculate_indicators(df):
         adjust=False
     ).mean()
 
-    df["macd"] = ema12 - ema26
+    df["macd"] = (
+        ema12 -
+        ema26
+    )
 
-    df["macd_signal"] = df["macd"].ewm(
-        span=9,
-        adjust=False
-    ).mean()
+    df["macd_signal"] = (
+        df["macd"].ewm(
+            span=9,
+            adjust=False
+        ).mean()
+    )
 
     df["macd_hist"] = (
         df["macd"] -
         df["macd_signal"]
     )
 
+    # -----------------------------------------------------
     # ATR
-    prev_close = df["close"].shift(1)
+    # -----------------------------------------------------
 
-    tr1 = df["high"] - df["low"]
+    previous_close = (
+        df["close"].shift(1)
+    )
+
+    tr1 = (
+        df["high"] -
+        df["low"]
+    )
 
     tr2 = (
         df["high"] -
-        prev_close
+        previous_close
     ).abs()
 
     tr3 = (
         df["low"] -
-        prev_close
+        previous_close
     ).abs()
 
     true_range = pd.concat(
-        [tr1, tr2, tr3],
+        [
+            tr1,
+            tr2,
+            tr3
+        ],
         axis=1
     ).max(axis=1)
 
-    df["atr"] = true_range.rolling(14).mean()
+    df["atr"] = (
+        true_range.rolling(
+            14
+        ).mean()
+    )
 
-    # Volume ratio
-    volume_ma = df["volume"].rolling(20).mean()
+    # -----------------------------------------------------
+    # VOLUME
+    # -----------------------------------------------------
+
+    volume_ma = (
+        df["volume"].rolling(
+            20
+        ).mean()
+    )
 
     df["volume_ratio"] = (
         df["volume"] /
-        volume_ma.replace(0, np.nan)
+        volume_ma.replace(
+            0,
+            np.nan
+        )
     )
 
-    # Candle body
+    # -----------------------------------------------------
+    # CANDLE BODY
+    # -----------------------------------------------------
+
     df["body"] = (
         df["close"] -
         df["open"]
@@ -263,54 +380,94 @@ def calculate_indicators(df):
 
     df["body_atr"] = (
         df["body"] /
-        df["atr"].replace(0, np.nan)
+        df["atr"].replace(
+            0,
+            np.nan
+        )
     )
 
-    # Distance from EMA21
+    # -----------------------------------------------------
+    # DISTANCE FROM EMA21
+    # -----------------------------------------------------
+
     df["ema21_distance_atr"] = (
-        (df["close"] - df["ema21"]).abs() /
-        df["atr"].replace(0, np.nan)
+        (
+            df["close"] -
+            df["ema21"]
+        ).abs()
+        /
+        df["atr"].replace(
+            0,
+            np.nan
+        )
     )
 
     return df
 
 
 # =========================================================
-# 1H MARKET REGIME
+# BUILD 1H MARKET REGIME
 # =========================================================
 
 def build_1h_regime(df):
 
-    temp = df.set_index("time").copy()
+    temp = df.copy()
+
+    temp["time"] = pd.to_datetime(
+        temp["time"],
+        utc=True
+    )
+
+    temp = temp.set_index(
+        "time"
+    )
 
     hourly = temp.resample(
         "1h",
         label="right",
         closed="right"
     ).agg({
+
         "open": "first",
         "high": "max",
         "low": "min",
         "close": "last",
         "volume": "sum"
+
     })
 
-    hourly = hourly.dropna().reset_index()
+    hourly = hourly.dropna()
 
-    hourly["ema20"] = hourly["close"].ewm(
-        span=20,
-        adjust=False
-    ).mean()
+    hourly = hourly.reset_index()
 
-    hourly["ema50"] = hourly["close"].ewm(
-        span=50,
-        adjust=False
-    ).mean()
+    # -----------------------------------------------------
+    # 1H EMA
+    # -----------------------------------------------------
 
-    hourly["ema100"] = hourly["close"].ewm(
-        span=100,
-        adjust=False
-    ).mean()
+    hourly["ema20"] = (
+        hourly["close"].ewm(
+            span=20,
+            adjust=False
+        ).mean()
+    )
+
+    hourly["ema50"] = (
+        hourly["close"].ewm(
+            span=50,
+            adjust=False
+        ).mean()
+    )
+
+    hourly["ema100"] = (
+        hourly["close"].ewm(
+            span=100,
+            adjust=False
+        ).mean()
+    )
+
+    # -----------------------------------------------------
+    # SLOPE
+    # -----------------------------------------------------
 
     hourly["slope20"] = (
         hourly["ema20"] -
@@ -322,97 +479,184 @@ def build_1h_regime(df):
         hourly["ema50"].shift(3)
     )
 
-    def regime(row):
+    # -----------------------------------------------------
+    # REGIME
+    # -----------------------------------------------------
+
+    def get_regime(row):
 
         if (
             row["ema20"] >
             row["ema50"] >
-            row["ema100"] and
-            row["slope20"] > 0 and
+            row["ema100"]
+            and
+            row["slope20"] > 0
+            and
             row["slope50"] > 0
         ):
+
             return "STRONG_UP"
 
         if (
             row["ema20"] <
             row["ema50"] <
-            row["ema100"] and
-            row["slope20"] < 0 and
+            row["ema100"]
+            and
+            row["slope20"] < 0
+            and
             row["slope50"] < 0
         ):
+
             return "STRONG_DOWN"
 
         if (
             row["ema20"] >
             row["ema50"]
         ):
+
             return "NORMAL_UP"
 
         if (
             row["ema20"] <
             row["ema50"]
         ):
+
             return "NORMAL_DOWN"
 
         return "SIDEWAYS"
 
     hourly["regime"] = hourly.apply(
-        regime,
+        get_regime,
         axis=1
     )
 
-    hourly["available_time"] = hourly["time"]
+    # This is the time at which the completed
+    # 1H candle becomes available.
+    hourly["available_time"] = (
+        hourly["time"]
+    )
 
     hourly["time"] = pd.to_datetime(
         hourly["time"],
         utc=True
-    ).astype("datetime64[ns, UTC]")
+    )
 
     hourly["available_time"] = pd.to_datetime(
         hourly["available_time"],
         utc=True
-    ).astype("datetime64[ns, UTC]")
+    )
 
     return hourly[
         [
-            "time",
             "available_time",
             "regime"
         ]
     ]
 
 
+# =========================================================
+# MERGE 1H REGIME INTO 15M DATA
+# =========================================================
+
 def merge_regime(df, hourly):
 
     df = df.copy()
 
+    hourly = hourly.copy()
+
+    # -----------------------------------------------------
+    # Make timestamp types identical
+    # -----------------------------------------------------
+
     df["time"] = pd.to_datetime(
         df["time"],
         utc=True
-    ).astype("datetime64[ns, UTC]")
+    ).astype(
+        "datetime64[ns, UTC]"
+    )
 
-    hourly = hourly.copy()
+    hourly["available_time"] = (
+        pd.to_datetime(
+            hourly["available_time"],
+            utc=True
+        ).astype(
+            "datetime64[ns, UTC]"
+        )
+    )
 
-    hourly["time"] = pd.to_datetime(
-        hourly["time"],
-        utc=True
-    ).astype("datetime64[ns, UTC]")
+    # -----------------------------------------------------
+    # Sort
+    # -----------------------------------------------------
 
-    hourly["available_time"] = pd.to_datetime(
-        hourly["available_time"],
-        utc=True
-    ).astype("datetime64[ns, UTC]")
+    df = df.sort_values(
+        "time"
+    ).reset_index(
+        drop=True
+    )
+
+    hourly = hourly.sort_values(
+        "available_time"
+    ).reset_index(
+        drop=True
+    )
+
+    # -----------------------------------------------------
+    # IMPORTANT:
+    # Only merge available_time + regime.
+    #
+    # This prevents time_x / time_y problem.
+    # -----------------------------------------------------
+
+    regime_data = hourly[
+        [
+            "available_time",
+            "regime"
+        ]
+    ].copy()
 
     df = pd.merge_asof(
-        df.sort_values("time"),
-        hourly.sort_values("available_time"),
+        df,
+        regime_data,
         left_on="time",
         right_on="available_time",
         direction="backward"
     )
 
-    df["regime"] = df["regime"].fillna(
-        "SIDEWAYS"
+    # -----------------------------------------------------
+    # Remove merge helper column
+    # -----------------------------------------------------
+
+    if "available_time" in df.columns:
+
+        df = df.drop(
+            columns=[
+                "available_time"
+            ]
+        )
+
+    # -----------------------------------------------------
+    # Missing regime
+    # -----------------------------------------------------
+
+    df["regime"] = (
+        df["regime"].fillna(
+            "SIDEWAYS"
+        )
+    )
+
+    # -----------------------------------------------------
+    # FINAL TIMESTAMP CHECK
+    # -----------------------------------------------------
+
+    df["time"] = pd.to_datetime(
+        df["time"],
+        utc=True
+    )
+
+    df = df.sort_values(
+        "time"
+    ).reset_index(
+        drop=True
     )
 
     return df
@@ -426,26 +670,30 @@ def get_base_signal(row):
 
     regime = row["regime"]
 
+    # No trading in sideways market
     if regime == "SIDEWAYS":
+
         return "WAIT"
 
     buy_score = 0
     sell_score = 0
 
     # -----------------------------------------------------
-    # MARKET REGIME
+    # 1H REGIME
     # -----------------------------------------------------
 
     if regime in [
         "STRONG_UP",
         "NORMAL_UP"
     ]:
+
         buy_score += 2
 
     if regime in [
         "STRONG_DOWN",
         "NORMAL_DOWN"
     ]:
+
         sell_score += 2
 
     # -----------------------------------------------------
@@ -457,6 +705,7 @@ def get_base_signal(row):
         row["ema21"] >
         row["ema50"]
     ):
+
         buy_score += 2
 
     if (
@@ -464,16 +713,25 @@ def get_base_signal(row):
         row["ema21"] <
         row["ema50"]
     ):
+
         sell_score += 2
 
     # -----------------------------------------------------
     # PRICE VS EMA21
     # -----------------------------------------------------
 
-    if row["close"] > row["ema21"]:
+    if (
+        row["close"] >
+        row["ema21"]
+    ):
+
         buy_score += 1
 
-    if row["close"] < row["ema21"]:
+    if (
+        row["close"] <
+        row["ema21"]
+    ):
+
         sell_score += 1
 
     # -----------------------------------------------------
@@ -481,50 +739,75 @@ def get_base_signal(row):
     # -----------------------------------------------------
 
     if row["macd_hist"] > 0:
+
         buy_score += 2
 
     if row["macd_hist"] < 0:
+
         sell_score += 2
 
     # -----------------------------------------------------
     # RSI
     # -----------------------------------------------------
 
-    if 50 <= row["rsi"] <= 68:
+    if (
+        50 <= row["rsi"] <= 68
+    ):
+
         buy_score += 1
 
-    if 32 <= row["rsi"] <= 50:
+    if (
+        32 <= row["rsi"] <= 50
+    ):
+
         sell_score += 1
 
     # -----------------------------------------------------
     # VOLUME
     # -----------------------------------------------------
 
-    if row["volume_ratio"] >= 1.2:
+    if (
+        row["volume_ratio"] >= 1.2
+    ):
 
         if buy_score > sell_score:
+
             buy_score += 1
 
         elif sell_score > buy_score:
+
             sell_score += 1
 
     # -----------------------------------------------------
     # CANDLE
     # -----------------------------------------------------
 
-    if row["body_atr"] >= 0.25:
+    if (
+        row["body_atr"] >= 0.25
+    ):
 
-        if row["close"] > row["open"]:
+        if (
+            row["close"] >
+            row["open"]
+        ):
+
             buy_score += 1
 
-        elif row["close"] < row["open"]:
+        elif (
+            row["close"] <
+            row["open"]
+        ):
+
             sell_score += 1
 
     # -----------------------------------------------------
     # OVEREXTENSION
     # -----------------------------------------------------
 
-    if row["ema21_distance_atr"] > 1.5:
+    if (
+        row["ema21_distance_atr"] >
+        1.5
+    ):
 
         buy_score -= 3
         sell_score -= 3
@@ -534,127 +817,26 @@ def get_base_signal(row):
     # -----------------------------------------------------
 
     if (
-        buy_score >= 6 and
+        buy_score >= 6
+        and
         buy_score > sell_score
     ):
+
         return "BUY"
 
     if (
-        sell_score >= 6 and
+        sell_score >= 6
+        and
         sell_score > buy_score
     ):
+
         return "SELL"
 
     return "WAIT"
 
 
 # =========================================================
-# CONFIRMATION
-# =========================================================
-
-def check_confirmation(
-    df,
-    signal_index,
-    direction,
-    max_wait,
-    confirmation_type
-):
-
-    signal_row = df.iloc[signal_index]
-
-    signal_close = signal_row["close"]
-    signal_high = signal_row["high"]
-    signal_low = signal_row["low"]
-
-    last_index = min(
-        signal_index + max_wait,
-        len(df) - 1
-    )
-
-    for j in range(
-        signal_index + 1,
-        last_index + 1
-    ):
-
-        row = df.iloc[j]
-
-        # -------------------------------------------------
-        # BUY
-        # -------------------------------------------------
-
-        if direction == "BUY":
-
-            if confirmation_type == "close":
-
-                if row["close"] > signal_close:
-
-                    return j
-
-            elif confirmation_type == "break_005":
-
-                level = signal_high * 1.0005
-
-                if row["high"] >= level:
-
-                    return j
-
-            elif confirmation_type == "break_010":
-
-                level = signal_high * 1.0010
-
-                if row["high"] >= level:
-
-                    return j
-
-            elif confirmation_type == "break_015":
-
-                level = signal_high * 1.0015
-
-                if row["high"] >= level:
-
-                    return j
-
-        # -------------------------------------------------
-        # SELL
-        # -------------------------------------------------
-
-        if direction == "SELL":
-
-            if confirmation_type == "close":
-
-                if row["close"] < signal_close:
-
-                    return j
-
-            elif confirmation_type == "break_005":
-
-                level = signal_low * 0.9995
-
-                if row["low"] <= level:
-
-                    return j
-
-            elif confirmation_type == "break_010":
-
-                level = signal_low * 0.9990
-
-                if row["low"] <= level:
-
-                    return j
-
-            elif confirmation_type == "break_015":
-
-                level = signal_low * 0.9985
-
-                if row["low"] <= level:
-
-                    return j
-
-    return None
-
-
-# =========================================================
-# BASE SIGNAL COLLECTION
+# COLLECT BASE SIGNALS
 # =========================================================
 
 def collect_base_signals(df):
@@ -663,8 +845,12 @@ def collect_base_signals(df):
 
     last_signal_index = -999
 
-    for i in range(120, len(df) - EVAL_CANDLES - 5):
+    for i in range(
+        120,
+        len(df) - EVAL_CANDLES - 5
+    ):
 
+        # Cooldown between base signals
         if (
             i -
             last_signal_index
@@ -682,8 +868,11 @@ def collect_base_signals(df):
         ]:
 
             signals.append({
+
                 "signal_index": i,
+
                 "signal": signal
+
             })
 
             last_signal_index = i
@@ -692,7 +881,174 @@ def collect_base_signals(df):
 
 
 # =========================================================
-# CONFIRMED TRADE
+# CHECK CONFIRMATION
+# =========================================================
+
+def check_confirmation(
+    df,
+    signal_index,
+    direction,
+    max_wait,
+    confirmation_type
+):
+
+    signal_row = df.iloc[
+        signal_index
+    ]
+
+    signal_close = (
+        signal_row["close"]
+    )
+
+    signal_high = (
+        signal_row["high"]
+    )
+
+    signal_low = (
+        signal_row["low"]
+    )
+
+    last_index = min(
+        signal_index +
+        max_wait,
+        len(df) - 1
+    )
+
+    for j in range(
+        signal_index + 1,
+        last_index + 1
+    ):
+
+        row = df.iloc[j]
+
+        # =================================================
+        # BUY
+        # =================================================
+
+        if direction == "BUY":
+
+            # Candle closes above signal close
+            if confirmation_type == "close":
+
+                if (
+                    row["close"] >
+                    signal_close
+                ):
+
+                    return j
+
+            # Price breaks signal high by 0.05%
+            elif confirmation_type == "break_005":
+
+                level = (
+                    signal_high *
+                    1.0005
+                )
+
+                if (
+                    row["high"] >=
+                    level
+                ):
+
+                    return j
+
+            # Price breaks signal high by 0.10%
+            elif confirmation_type == "break_010":
+
+                level = (
+                    signal_high *
+                    1.0010
+                )
+
+                if (
+                    row["high"] >=
+                    level
+                ):
+
+                    return j
+
+            # Price breaks signal high by 0.15%
+            elif confirmation_type == "break_015":
+
+                level = (
+                    signal_high *
+                    1.0015
+                )
+
+                if (
+                    row["high"] >=
+                    level
+                ):
+
+                    return j
+
+        # =================================================
+        # SELL
+        # =================================================
+
+        elif direction == "SELL":
+
+            # Candle closes below signal close
+            if confirmation_type == "close":
+
+                if (
+                    row["close"] <
+                    signal_close
+                ):
+
+                    return j
+
+            # Price breaks signal low by 0.05%
+            elif confirmation_type == "break_005":
+
+                level = (
+                    signal_low *
+                    0.9995
+                )
+
+                if (
+                    row["low"] <=
+                    level
+                ):
+
+                    return j
+
+            # Price breaks signal low by 0.10%
+            elif confirmation_type == "break_010":
+
+                level = (
+                    signal_low *
+                    0.9990
+                )
+
+                if (
+                    row["low"] <=
+                    level
+                ):
+
+                    return j
+
+            # Price breaks signal low by 0.15%
+            elif confirmation_type == "break_015":
+
+                level = (
+                    signal_low *
+                    0.9985
+                )
+
+                if (
+                    row["low"] <=
+                    level
+                ):
+
+                    return j
+
+    # No confirmation
+    return None
+
+
+# =========================================================
+# SIMULATE CONFIRMED TRADE
 # =========================================================
 
 def simulate_confirmed_trade(
@@ -702,18 +1058,34 @@ def simulate_confirmed_trade(
     direction
 ):
 
-    if entry_index >= len(df) - 1:
+    if (
+        entry_index >=
+        len(df) - 1
+    ):
+
         return None
 
-    entry_row = df.iloc[entry_index]
+    entry_row = df.iloc[
+        entry_index
+    ]
 
-    entry_price = entry_row["close"]
+    entry_price = (
+        entry_row["close"]
+    )
 
-    # ATR at actual entry
     atr = entry_row["atr"]
 
-    if pd.isna(atr) or atr <= 0:
+    if (
+        pd.isna(atr)
+        or
+        atr <= 0
+    ):
+
         return None
+
+    # -----------------------------------------------------
+    # TP / SL
+    # -----------------------------------------------------
 
     if direction == "BUY":
 
@@ -747,10 +1119,16 @@ def simulate_confirmed_trade(
 
     result = "TIMEOUT"
 
-    exit_price = df.iloc[end_index]["close"]
+    exit_price = (
+        df.iloc[end_index]["close"]
+    )
 
     mfe = 0.0
     mae = 0.0
+
+    # -----------------------------------------------------
+    # WALK FORWARD
+    # -----------------------------------------------------
 
     for j in range(
         entry_index + 1,
@@ -782,11 +1160,13 @@ def simulate_confirmed_trade(
             )
 
             hit_tp = (
-                row["high"] >= tp_price
+                row["high"] >=
+                tp_price
             )
 
             hit_sl = (
-                row["low"] <= sl_price
+                row["low"] <=
+                sl_price
             )
 
         else:
@@ -812,22 +1192,27 @@ def simulate_confirmed_trade(
             )
 
             hit_tp = (
-                row["low"] <= tp_price
+                row["low"] <=
+                tp_price
             )
 
             hit_sl = (
-                row["high"] >= sl_price
+                row["high"] >=
+                sl_price
             )
 
-        # Conservative:
-        # if both happen in same candle,
-        # assume SL first.
+        # -------------------------------------------------
+        # Conservative assumption:
+        # SL first if both happen same candle
+        # -------------------------------------------------
 
         if hit_sl:
 
             result = "SL"
 
-            exit_price = sl_price
+            exit_price = (
+                sl_price
+            )
 
             break
 
@@ -835,12 +1220,14 @@ def simulate_confirmed_trade(
 
             result = "TP"
 
-            exit_price = tp_price
+            exit_price = (
+                tp_price
+            )
 
             break
 
     # -----------------------------------------------------
-    # GROSS RETURN
+    # RETURN
     # -----------------------------------------------------
 
     if direction == "BUY":
@@ -866,71 +1253,89 @@ def simulate_confirmed_trade(
     # R MULTIPLE
     # -----------------------------------------------------
 
-    risk_price = atr
-
     if direction == "BUY":
 
         r_multiple = (
             exit_price -
             entry_price
-        ) / risk_price
+        ) / atr
 
     else:
 
         r_multiple = (
             entry_price -
             exit_price
-        ) / risk_price
+        ) / atr
 
     return {
-        "signal_index": signal_index,
-        "entry_index": entry_index,
-        "signal_time": df.iloc[
-            signal_index
-        ]["time"],
 
-        "entry_time": df.iloc[
-            entry_index
-        ]["time"],
+        "signal_index":
+            signal_index,
 
-        "direction": direction,
+        "entry_index":
+            entry_index,
 
-        "signal_close": df.iloc[
-            signal_index
-        ]["close"],
+        "signal_time":
+            df.iloc[
+                signal_index
+            ]["time"],
 
-        "entry_price": entry_price,
+        "entry_time":
+            df.iloc[
+                entry_index
+            ]["time"],
 
-        "exit_price": exit_price,
+        "direction":
+            direction,
 
-        "result": result,
+        "signal_close":
+            df.iloc[
+                signal_index
+            ]["close"],
 
-        "gross_return": gross_return,
+        "entry_price":
+            entry_price,
 
-        "net_return": net_return,
+        "exit_price":
+            exit_price,
 
-        "r_multiple": r_multiple,
+        "result":
+            result,
 
-        "mfe": mfe,
+        "gross_return":
+            gross_return,
 
-        "mae": mae,
+        "net_return":
+            net_return,
 
-        "regime": df.iloc[
-            signal_index
-        ]["regime"],
+        "r_multiple":
+            r_multiple,
 
-        "rsi": df.iloc[
-            signal_index
-        ]["rsi"],
+        "mfe":
+            mfe,
 
-        "volume_ratio": df.iloc[
-            signal_index
-        ]["volume_ratio"]
+        "mae":
+            mae,
+
+        "regime":
+            df.iloc[
+                signal_index
+            ]["regime"],
+
+        "rsi":
+            df.iloc[
+                signal_index
+            ]["rsi"],
+
+        "volume_ratio":
+            df.iloc[
+                signal_index
+            ]["volume_ratio"]
     }
 
 
 # =========================================================
-# RUN CONFIGURATION
+# RUN ONE CONFIGURATION
 # =========================================================
 
 def run_configuration(
@@ -939,7 +1344,9 @@ def run_configuration(
     config
 ):
 
-    name, max_wait, confirmation_type = config
+    name, max_wait, confirmation_type = (
+        config
+    )
 
     trades = []
 
@@ -947,8 +1354,17 @@ def run_configuration(
 
     for s in signals:
 
-        signal_index = s["signal_index"]
-        direction = s["signal"]
+        signal_index = (
+            s["signal_index"]
+        )
+
+        direction = (
+            s["signal"]
+        )
+
+        # -------------------------------------------------
+        # Cooldown based on actual entry
+        # -------------------------------------------------
 
         if (
             signal_index -
@@ -956,6 +1372,10 @@ def run_configuration(
         ) < COOLDOWN_CANDLES:
 
             continue
+
+        # -------------------------------------------------
+        # Find confirmation
+        # -------------------------------------------------
 
         entry_index = check_confirmation(
             df,
@@ -965,16 +1385,25 @@ def run_configuration(
             confirmation_type
         )
 
+        # No confirmation
         if entry_index is None:
+
             continue
 
-        # Avoid overlapping trades
+        # -------------------------------------------------
+        # Prevent overlapping trades
+        # -------------------------------------------------
+
         if (
             entry_index -
             last_entry_index
         ) < COOLDOWN_CANDLES:
 
             continue
+
+        # -------------------------------------------------
+        # Simulate trade
+        # -------------------------------------------------
 
         trade = simulate_confirmed_trade(
             df,
@@ -985,13 +1414,25 @@ def run_configuration(
 
         if trade is not None:
 
-            trade["configuration"] = name
+            trade["configuration"] = (
+                name
+            )
 
-            trades.append(trade)
+            trades.append(
+                trade
+            )
 
-            last_entry_index = entry_index
+            last_entry_index = (
+                entry_index
+            )
 
-    return pd.DataFrame(trades)
+    if not trades:
+
+        return pd.DataFrame()
+
+    return pd.DataFrame(
+        trades
+    )
 
 
 # =========================================================
@@ -1011,20 +1452,24 @@ def summarize(
     if trades.empty:
 
         print("No trades.")
+
         return None
 
     total = len(trades)
 
     tp = (
-        trades["result"] == "TP"
+        trades["result"] ==
+        "TP"
     ).sum()
 
     sl = (
-        trades["result"] == "SL"
+        trades["result"] ==
+        "SL"
     ).sum()
 
     timeout = (
-        trades["result"] == "TIMEOUT"
+        trades["result"] ==
+        "TIMEOUT"
     ).sum()
 
     avg_return = (
@@ -1051,7 +1496,9 @@ def summarize(
         trades["mae"].mean()
     )
 
-    print(f"Trades: {total}")
+    print(
+        f"Trades: {total}"
+    )
 
     print(
         f"TP: {tp} "
@@ -1099,24 +1546,42 @@ def summarize(
     )
 
     return {
+
         "trades": total,
+
         "tp": tp,
+
         "sl": sl,
+
         "timeout": timeout,
-        "avg_return": avg_return,
-        "total_return": total_return,
-        "avg_r": avg_r,
-        "total_r": total_r,
-        "avg_mfe": avg_mfe,
-        "avg_mae": avg_mae
+
+        "avg_return":
+            avg_return,
+
+        "total_return":
+            total_return,
+
+        "avg_r":
+            avg_r,
+
+        "total_r":
+            total_r,
+
+        "avg_mfe":
+            avg_mfe,
+
+        "avg_mae":
+            avg_mae
     }
 
 
 # =========================================================
-# CONDITION DETAILS
+# DIRECTION RESULTS
 # =========================================================
 
-def print_direction_stats(trades):
+def print_direction_stats(
+    trades
+):
 
     print()
     print("DIRECTION RESULTS")
@@ -1133,6 +1598,7 @@ def print_direction_stats(trades):
         ]
 
         if subset.empty:
+
             continue
 
         print(
@@ -1149,7 +1615,13 @@ def print_direction_stats(trades):
         )
 
 
-def print_regime_stats(trades):
+# =========================================================
+# REGIME RESULTS
+# =========================================================
+
+def print_regime_stats(
+    trades
+):
 
     print()
     print("REGIME RESULTS")
@@ -1175,23 +1647,70 @@ def print_regime_stats(trades):
 
 def main():
 
+    # -----------------------------------------------------
+    # Download
+    # -----------------------------------------------------
+
     df = download_data()
+
+    # -----------------------------------------------------
+    # Indicators
+    # -----------------------------------------------------
 
     df = calculate_indicators(
         df
     )
 
+    # -----------------------------------------------------
+    # 1H regime
+    # -----------------------------------------------------
+
     hourly = build_1h_regime(
         df
     )
+
+    # -----------------------------------------------------
+    # Merge regime
+    # -----------------------------------------------------
 
     df = merge_regime(
         df,
         hourly
     )
 
-    df = df.dropna().reset_index(
+    # -----------------------------------------------------
+    # Remove incomplete indicator rows
+    # -----------------------------------------------------
+
+    df = df.dropna(
+        subset=[
+            "ema9",
+            "ema21",
+            "ema50",
+            "rsi",
+            "macd_hist",
+            "atr",
+            "volume_ratio",
+            "body_atr",
+            "ema21_distance_atr"
+        ]
+    ).reset_index(
         drop=True
+    )
+
+    # -----------------------------------------------------
+    # Verify time column
+    # -----------------------------------------------------
+
+    if "time" not in df.columns:
+
+        raise RuntimeError(
+            "ERROR: time column is missing."
+        )
+
+    df["time"] = pd.to_datetime(
+        df["time"],
+        utc=True
     )
 
     print()
@@ -1200,8 +1719,14 @@ def main():
         f"{len(df):,}"
     )
 
+    # -----------------------------------------------------
+    # Base signals
+    # -----------------------------------------------------
+
     print()
-    print("📊 Creating base signals...")
+    print(
+        "📊 Creating base signals..."
+    )
 
     signals = collect_base_signals(
         df
@@ -1213,23 +1738,33 @@ def main():
     )
 
     if not signals:
-        print("No base signals found.")
+
+        print(
+            "No base signals found."
+        )
+
         return
 
-    # =====================================================
-    # DATE SPLIT
-    # =====================================================
+    # -----------------------------------------------------
+    # Time split
+    # -----------------------------------------------------
 
-    last_time = df["time"].iloc[-1]
+    last_time = (
+        df["time"].iloc[-1]
+    )
 
     validation_start = (
         last_time -
-        timedelta(days=VALIDATION_DAYS)
+        timedelta(
+            days=VALIDATION_DAYS
+        )
     )
 
     training_start = (
         validation_start -
-        timedelta(days=TRAIN_DAYS)
+        timedelta(
+            days=TRAIN_DAYS
+        )
     )
 
     print()
@@ -1247,12 +1782,11 @@ def main():
         f"{last_time}"
     )
 
-    # =====================================================
-    # SPLIT BASE SIGNALS
-    # =====================================================
+    # -----------------------------------------------------
+    # Split signals
+    # -----------------------------------------------------
 
     train_signals = []
-
     validation_signals = []
 
     for s in signals:
@@ -1266,11 +1800,17 @@ def main():
             validation_start
         ):
 
-            train_signals.append(s)
+            train_signals.append(
+                s
+            )
 
-        elif t >= validation_start:
+        elif (
+            t >= validation_start
+        ):
 
-            validation_signals.append(s)
+            validation_signals.append(
+                s
+            )
 
     print()
     print(
@@ -1284,14 +1824,16 @@ def main():
     )
 
     # =====================================================
-    # TEST ALL CONFIRMATION CONFIGS
+    # TRAINING
     # =====================================================
 
     training_results = []
 
     print()
     print("=" * 70)
-    print("TRAINING CONFIRMATION CONFIGURATIONS")
+    print(
+        "TRAINING CONFIRMATION CONFIGURATIONS"
+    )
     print("=" * 70)
 
     for config in CONFIRM_CONFIGS:
@@ -1306,44 +1848,62 @@ def main():
 
         if trades.empty:
 
+            print()
             print(
-                f"{name}: "
-                f"NO TRADES"
+                f"{name}: NO TRADES"
             )
 
             continue
 
         stats = summarize(
             trades,
-            name
+            f"TRAINING - {name}"
         )
 
         if stats is not None:
 
             training_results.append({
-                "config": config,
-                "stats": stats,
-                "trades": trades
+
+                "config":
+                    config,
+
+                "stats":
+                    stats,
+
+                "trades":
+                    trades
             })
 
     # =====================================================
-    # SELECT POSITIVE TRAINING CONFIGS
+    # POSITIVE TRAINING CONFIGS
     # =====================================================
 
     positive = [
-        x for x in training_results
+
+        x for x in
+        training_results
+
         if (
             x["stats"]["trades"] >=
             MIN_TRAIN_TRADES
+
             and
-            x["stats"]["avg_return"] > 0
+
+            x["stats"]["avg_return"] >
+            0
         )
     ]
 
     print()
     print("=" * 70)
-    print("POSITIVE TRAINING CONFIGURATIONS")
+    print(
+        "POSITIVE TRAINING CONFIGURATIONS"
+    )
     print("=" * 70)
+
+    # -----------------------------------------------------
+    # No positive config
+    # -----------------------------------------------------
 
     if not positive:
 
@@ -1354,32 +1914,49 @@ def main():
 
         print()
         print(
-            "Therefore validation will NOT "
-            "force a configuration."
+            "Validation will NOT be forced."
         )
 
-        # Save all training results
-        all_training = []
+        # Save training results
+        rows = []
 
         for x in training_results:
 
-            all_training.append({
-                "config": x["config"][0],
-                "trades": x["stats"]["trades"],
-                "avg_return": x["stats"]["avg_return"],
-                "total_return": x["stats"]["total_return"],
-                "avg_r": x["stats"]["avg_r"],
-                "total_r": x["stats"]["total_r"],
-                "avg_mfe": x["stats"]["avg_mfe"],
-                "avg_mae": x["stats"]["avg_mae"]
+            rows.append({
+
+                "config":
+                    x["config"][0],
+
+                "trades":
+                    x["stats"]["trades"],
+
+                "avg_return":
+                    x["stats"]["avg_return"],
+
+                "total_return":
+                    x["stats"]["total_return"],
+
+                "avg_r":
+                    x["stats"]["avg_r"],
+
+                "total_r":
+                    x["stats"]["total_r"],
+
+                "avg_mfe":
+                    x["stats"]["avg_mfe"],
+
+                "avg_mae":
+                    x["stats"]["avg_mae"]
             })
 
-        pd.DataFrame(
-            all_training
-        ).to_csv(
-            "btc_confirmation_training.csv",
-            index=False
-        )
+        if rows:
+
+            pd.DataFrame(
+                rows
+            ).to_csv(
+                "btc_confirmation_training.csv",
+                index=False
+            )
 
         print()
         print(
@@ -1387,7 +1964,16 @@ def main():
             "btc_confirmation_training.csv"
         )
 
+        print()
+        print(
+            "🏁 Backtest finished."
+        )
+
         return
+
+    # -----------------------------------------------------
+    # Sort positive configs
+    # -----------------------------------------------------
 
     positive.sort(
         key=lambda x:
@@ -1414,12 +2000,13 @@ def main():
 
     print()
     print("=" * 70)
-    print("UNSEEN VALIDATION")
+    print(
+        "UNSEEN VALIDATION"
+    )
     print("=" * 70)
 
     validation_all = []
 
-    # Use positive training configurations only
     for x in positive:
 
         config = x["config"]
@@ -1432,6 +2019,7 @@ def main():
 
         if trades.empty:
 
+            print()
             print(
                 f"{config[0]}: "
                 f"No validation trades."
@@ -1480,9 +2068,15 @@ def main():
 
     print()
     print("=" * 70)
-    print("✅ CONFIRMATION BACKTEST COMPLETE")
+    print(
+        "✅ CONFIRMATION BACKTEST COMPLETE"
+    )
     print("=" * 70)
 
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
     main()
