@@ -4,66 +4,75 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 
 # ============================================================
-# BTC 15M LIQUIDITY SWEEP + CONFIRMATION BACKTEST
-# Balanced version
+# BTC 15M LIQUIDITY SWEEP - ENTRY TIMING BACKTEST
 # ============================================================
 
 PRODUCT = "BTC-USD"
-GRANULARITY = 900          # 15 minutes
+GRANULARITY = 900
 TOTAL_DAYS = 183
 
 TRAIN_DAYS = 120
 VALIDATION_DAYS = 63
 
-COST = 0.0014              # 0.14% round-trip cost
-COOLDOWN_CANDLES = 12      # 3 hours
-MAX_HOLD_CANDLES = 12      # 3 hours
+COST = 0.0014
+
+SWING_LOOKBACK = 12
+
+# Sweep sensitivity
+SWEEP_ATR = 0.05
+
+# Maximum candles after sweep to wait
+MAX_WAIT = 2
+
+# Maximum trade holding time
+MAX_HOLD = 12
+
+# Cooldown
+COOLDOWN = 12
 
 MIN_TRAIN_TRADES = 30
 MIN_VALIDATION_TRADES = 30
 
-# Sweep settings
-SWING_LOOKBACK = 12
-SWEEP_ATR = 0.05
-RECLAIM_ATR = 0.00
-
-# Confirmation
-MAX_CONFIRM_CANDLES = 2
 
 # ============================================================
-# DATA DOWNLOAD
+# DOWNLOAD DATA
 # ============================================================
 
-def download_candles():
+def download_data():
+
     print("📥 Downloading BTC 15M data...")
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=TOTAL_DAYS)
 
-    all_rows = []
+    rows = []
     cursor = start
 
     chunk_seconds = GRANULARITY * 250
 
     while cursor < end:
+
         chunk_end = min(
             cursor + timedelta(seconds=chunk_seconds),
             end
         )
-
-        url = f"https://api.exchange.coinbase.com/products/{PRODUCT}/candles"
-
-        params = {
-            "granularity": GRANULARITY,
-            "start": cursor.isoformat(),
-            "end": chunk_end.isoformat()
-        }
 
         print(
             f"Downloading: "
             f"{cursor.strftime('%Y-%m-%d')} "
             f"to {chunk_end.strftime('%Y-%m-%d')}"
         )
+
+        url = (
+            "https://api.exchange.coinbase.com/"
+            f"products/{PRODUCT}/candles"
+        )
+
+        params = {
+            "granularity": GRANULARITY,
+            "start": cursor.isoformat(),
+            "end": chunk_end.isoformat()
+        }
 
         r = requests.get(
             url,
@@ -73,19 +82,15 @@ def download_candles():
 
         r.raise_for_status()
 
-        rows = r.json()
+        data = r.json()
 
-        if rows:
-            all_rows.extend(rows)
+        if data:
+            rows.extend(data)
 
-        cursor = chunk_end
-        cursor += timedelta(seconds=1)
-
-    if not all_rows:
-        raise RuntimeError("No BTC data received.")
+        cursor = chunk_end + timedelta(seconds=1)
 
     df = pd.DataFrame(
-        all_rows,
+        rows,
         columns=[
             "timestamp",
             "low",
@@ -106,7 +111,9 @@ def download_candles():
         subset=["timestamp"]
     )
 
-    df = df.sort_values("timestamp")
+    df = df.sort_values(
+        "timestamp"
+    )
 
     for col in [
         "open",
@@ -115,11 +122,15 @@ def download_candles():
         "close",
         "volume"
     ]:
-        df[col] = pd.to_numeric(df[col])
+        df[col] = pd.to_numeric(
+            df[col]
+        )
 
     df = df.reset_index(drop=True)
 
-    print(f"✅ Total candles: {len(df)}")
+    print(
+        f"✅ Total candles: {len(df)}"
+    )
 
     return df
 
@@ -128,11 +139,11 @@ def download_candles():
 # INDICATORS
 # ============================================================
 
-def add_indicators(df):
+def indicators(df):
 
     d = df.copy()
 
-    # 15M EMA
+    # EMA
     d["ema9"] = d["close"].ewm(
         span=9,
         adjust=False
@@ -143,23 +154,27 @@ def add_indicators(df):
         adjust=False
     ).mean()
 
-    d["ema50"] = d["close"].ewm(
-        span=50,
-        adjust=False
-    ).mean()
-
     # RSI
     delta = d["close"].diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.clip(
+        lower=0
+    )
+
+    loss = -delta.clip(
+        upper=0
+    )
 
     avg_gain = gain.rolling(14).mean()
     avg_loss = loss.rolling(14).mean()
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = (
+        avg_gain /
+        avg_loss.replace(0, np.nan)
+    )
 
-    d["rsi"] = 100 - (
+    d["rsi"] = (
+        100 -
         100 / (1 + rs)
     )
 
@@ -174,9 +189,14 @@ def add_indicators(df):
         adjust=False
     ).mean()
 
-    d["macd"] = ema12 - ema26
+    d["macd"] = (
+        ema12 -
+        ema26
+    )
 
-    d["macd_signal"] = d["macd"].ewm(
+    d["macd_signal"] = d[
+        "macd"
+    ].ewm(
         span=9,
         adjust=False
     ).mean()
@@ -187,17 +207,21 @@ def add_indicators(df):
     )
 
     # ATR
-    prev_close = d["close"].shift(1)
+    prev = d["close"].shift(1)
 
-    tr1 = d["high"] - d["low"]
+    tr1 = (
+        d["high"] -
+        d["low"]
+    )
+
     tr2 = (
         d["high"] -
-        prev_close
+        prev
     ).abs()
 
     tr3 = (
         d["low"] -
-        prev_close
+        prev
     ).abs()
 
     d["tr"] = pd.concat(
@@ -205,28 +229,35 @@ def add_indicators(df):
         axis=1
     ).max(axis=1)
 
-    d["atr"] = d["tr"].rolling(14).mean()
+    d["atr"] = d["tr"].rolling(
+        14
+    ).mean()
 
-    # Volume average
-    d["volume_avg"] = d["volume"].rolling(20).mean()
+    # Volume
+    d["volume_avg"] = d[
+        "volume"
+    ].rolling(20).mean()
 
     d["volume_ratio"] = (
         d["volume"] /
         d["volume_avg"]
     )
 
-    # Candle
+    # Candle body
     d["body"] = (
         d["close"] -
         d["open"]
     ).abs()
 
-    d["range"] = (
-        d["high"] -
-        d["low"]
-    )
+    return d
 
-    # 1H data
+
+# ============================================================
+# 1H TREND
+# ============================================================
+
+def add_1h_trend(d):
+
     h = (
         d.set_index("timestamp")
         .resample("1h")
@@ -239,25 +270,27 @@ def add_indicators(df):
         .dropna()
     )
 
-    h["ema20"] = h["close"].ewm(
+    h["ema20"] = h[
+        "close"
+    ].ewm(
         span=20,
         adjust=False
     ).mean()
 
-    h["ema50"] = h["close"].ewm(
+    h["ema50"] = h[
+        "close"
+    ].ewm(
         span=50,
         adjust=False
     ).mean()
 
-    h["atr"] = (
-        h["high"] -
-        h["low"]
-    ).rolling(14).mean()
-
     h["trend"] = "SIDEWAYS"
 
     h.loc[
-        (h["ema20"] > h["ema50"]) &
+        (
+            h["ema20"] >
+            h["ema50"]
+        ) &
         (
             h["close"] >
             h["ema20"]
@@ -266,7 +299,10 @@ def add_indicators(df):
     ] = "UP"
 
     h.loc[
-        (h["ema20"] < h["ema50"]) &
+        (
+            h["ema20"] <
+            h["ema50"]
+        ) &
         (
             h["close"] <
             h["ema20"]
@@ -275,212 +311,237 @@ def add_indicators(df):
     ] = "DOWN"
 
     d = pd.merge_asof(
-        d.sort_values("timestamp"),
+        d.sort_values(
+            "timestamp"
+        ),
         h[
             [
                 "ema20",
                 "ema50",
-                "atr",
                 "trend"
             ]
         ].reset_index(),
         on="timestamp",
-        direction="backward",
-        suffixes=("", "_1h")
+        direction="backward"
     )
 
     return d
 
 
 # ============================================================
-# LIQUIDITY SWEEP DETECTION
+# FIND LIQUIDITY SWEEPS
 # ============================================================
 
-def detect_sweep(d, i):
+def find_sweeps(d):
 
-    if i < SWING_LOOKBACK + 5:
-        return None
+    sweeps = []
 
-    row = d.iloc[i]
-
-    atr = row["atr"]
-
-    if pd.isna(atr) or atr <= 0:
-        return None
-
-    previous = d.iloc[
-        i - SWING_LOOKBACK:i
-    ]
-
-    swing_low = previous["low"].min()
-    swing_high = previous["high"].max()
-
-    # --------------------------------------------------------
-    # BUY SWEEP
-    # Price breaks previous low,
-    # then closes back above that level.
-    # --------------------------------------------------------
-
-    buy_sweep = (
-        row["low"] <
-        swing_low - atr * SWEEP_ATR
-        and
-        row["close"] >
-        swing_low + atr * RECLAIM_ATR
-    )
-
-    # --------------------------------------------------------
-    # SELL SWEEP
-    # Price breaks previous high,
-    # then closes back below that level.
-    # --------------------------------------------------------
-
-    sell_sweep = (
-        row["high"] >
-        swing_high + atr * SWEEP_ATR
-        and
-        row["close"] <
-        swing_high - atr * RECLAIM_ATR
-    )
-
-    if buy_sweep:
-        return {
-            "direction": "BUY",
-            "level": swing_low,
-            "sweep_index": i
-        }
-
-    if sell_sweep:
-        return {
-            "direction": "SELL",
-            "level": swing_high,
-            "sweep_index": i
-        }
-
-    return None
-
-
-# ============================================================
-# CONFIRMATION
-# ============================================================
-
-def confirm_trade(d, sweep):
-
-    direction = sweep["direction"]
-    start = sweep["sweep_index"]
-
-    for j in range(
-        start,
-        min(
-            start +
-            MAX_CONFIRM_CANDLES +
-            1,
-            len(d)
-        )
+    for i in range(
+        SWING_LOOKBACK + 60,
+        len(d) - MAX_WAIT - MAX_HOLD - 1
     ):
 
-        row = d.iloc[j]
+        row = d.iloc[i]
 
         atr = row["atr"]
 
         if pd.isna(atr) or atr <= 0:
             continue
 
-        body = abs(
-            row["close"] -
-            row["open"]
-        )
+        trend = row["trend"]
 
-        # BUY confirmation
+        if trend not in [
+            "UP",
+            "DOWN"
+        ]:
+            continue
+
+        previous = d.iloc[
+            i - SWING_LOOKBACK:i
+        ]
+
+        swing_low = previous[
+            "low"
+        ].min()
+
+        swing_high = previous[
+            "high"
+        ].max()
+
+        # BUY sweep
+        if trend == "UP":
+
+            if (
+                row["low"] <
+                swing_low -
+                atr * SWEEP_ATR
+            ):
+
+                sweeps.append({
+                    "sweep_index": i,
+                    "direction": "BUY",
+                    "level": swing_low
+                })
+
+        # SELL sweep
+        elif trend == "DOWN":
+
+            if (
+                row["high"] >
+                swing_high +
+                atr * SWEEP_ATR
+            ):
+
+                sweeps.append({
+                    "sweep_index": i,
+                    "direction": "SELL",
+                    "level": swing_high
+                })
+
+    return sweeps
+
+
+# ============================================================
+# ENTRY TIMING METHODS
+# ============================================================
+
+def find_entry(
+    d,
+    sweep,
+    method
+):
+
+    i = sweep["sweep_index"]
+    direction = sweep["direction"]
+    level = sweep["level"]
+
+    last = min(
+        i + MAX_WAIT,
+        len(d) - 1
+    )
+
+    # --------------------------------------------------------
+    # METHOD 1
+    # Enter immediately at sweep candle close
+    # --------------------------------------------------------
+
+    if method == "SWEEP_CLOSE":
+
+        row = d.iloc[i]
+
         if direction == "BUY":
 
-            bullish = (
-                row["close"] >
-                row["open"]
-            )
-
-            above_ema = (
-                row["close"] >
-                row["ema21"]
-            )
-
-            macd_ok = (
-                row["macd_hist"] >= 0
-            )
-
-            rsi_ok = (
-                40 <= row["rsi"] <= 70
-            )
-
-            volume_ok = (
-                row["volume_ratio"] >= 0.75
-            )
-
-            score = sum([
-                bullish,
-                above_ema,
-                macd_ok,
-                rsi_ok,
-                volume_ok
-            ])
-
-            # Need 3 of 5
-            if score >= 3:
+            if row["close"] > level:
 
                 return {
-                    "entry_index": j,
-                    "direction": "BUY",
-                    "entry": row["close"],
-                    "atr": atr
+                    "entry_index": i,
+                    "direction": direction,
+                    "entry": row["close"]
                 }
 
-        # SELL confirmation
         else:
 
-            bearish = (
-                row["close"] <
-                row["open"]
-            )
+            if row["close"] < level:
 
-            below_ema = (
-                row["close"] <
-                row["ema21"]
-            )
+                return {
+                    "entry_index": i,
+                    "direction": direction,
+                    "entry": row["close"]
+                }
 
-            macd_ok = (
-                row["macd_hist"] <= 0
-            )
+        return None
 
-            rsi_ok = (
-                30 <= row["rsi"] <= 60
-            )
+    # --------------------------------------------------------
+    # METHOD 2
+    # Wait 1 candle for confirmation
+    # --------------------------------------------------------
 
-            volume_ok = (
-                row["volume_ratio"] >= 0.75
-            )
+    if method == "CONFIRM_1":
 
-            score = sum([
-                bearish,
-                below_ema,
-                macd_ok,
-                rsi_ok,
-                volume_ok
-            ])
+        j = i + 1
 
-            if score >= 3:
+        if j >= len(d):
+            return None
+
+        row = d.iloc[j]
+
+        if direction == "BUY":
+
+            if (
+                row["close"] > row["open"]
+                and
+                row["close"] > level
+            ):
 
                 return {
                     "entry_index": j,
-                    "direction": "SELL",
-                    "entry": row["close"],
-                    "atr": atr
+                    "direction": direction,
+                    "entry": row["close"]
                 }
+
+        else:
+
+            if (
+                row["close"] < row["open"]
+                and
+                row["close"] < level
+            ):
+
+                return {
+                    "entry_index": j,
+                    "direction": direction,
+                    "entry": row["close"]
+                }
+
+        return None
+
+    # --------------------------------------------------------
+    # METHOD 3
+    # Wait up to 2 candles
+    # --------------------------------------------------------
+
+    if method == "CONFIRM_2":
+
+        for j in range(
+            i + 1,
+            last + 1
+        ):
+
+            row = d.iloc[j]
+
+            if direction == "BUY":
+
+                if (
+                    row["close"] > row["open"]
+                    and
+                    row["close"] > level
+                ):
+
+                    return {
+                        "entry_index": j,
+                        "direction": direction,
+                        "entry": row["close"]
+                    }
+
+            else:
+
+                if (
+                    row["close"] < row["open"]
+                    and
+                    row["close"] < level
+                ):
+
+                    return {
+                        "entry_index": j,
+                        "direction": direction,
+                        "entry": row["close"]
+                    }
 
     return None
 
 
 # ============================================================
-# TEST ONE TRADE
+# TEST TRADE
 # ============================================================
 
 def test_trade(
@@ -490,66 +551,84 @@ def test_trade(
     sl_mult
 ):
 
-    entry_index = setup["entry_index"]
-    direction = setup["direction"]
+    i = setup["entry_index"]
+
+    direction = setup[
+        "direction"
+    ]
 
     entry = setup["entry"]
-    atr = setup["atr"]
+
+    atr = d.iloc[i]["atr"]
 
     if pd.isna(atr) or atr <= 0:
         return None
 
     if direction == "BUY":
 
-        tp = entry + atr * tp_mult
-        sl = entry - atr * sl_mult
+        tp = (
+            entry +
+            atr * tp_mult
+        )
+
+        sl = (
+            entry -
+            atr * sl_mult
+        )
 
     else:
 
-        tp = entry - atr * tp_mult
-        sl = entry + atr * sl_mult
+        tp = (
+            entry -
+            atr * tp_mult
+        )
 
-    end_index = min(
-        entry_index +
-        MAX_HOLD_CANDLES,
+        sl = (
+            entry +
+            atr * sl_mult
+        )
+
+    end = min(
+        i + MAX_HOLD,
         len(d) - 1
     )
 
-    max_favorable = 0.0
-    max_adverse = 0.0
-
     result = "TIMEOUT"
+
     exit_price = d.iloc[
-        end_index
+        end
     ]["close"]
 
+    mfe = 0.0
+    mae = 0.0
+
     for j in range(
-        entry_index + 1,
-        end_index + 1
+        i + 1,
+        end + 1
     ):
 
         row = d.iloc[j]
 
         if direction == "BUY":
 
-            favorable = (
+            fav = (
                 row["high"] -
                 entry
             ) / entry
 
-            adverse = (
+            adv = (
                 row["low"] -
                 entry
             ) / entry
 
-            max_favorable = max(
-                max_favorable,
-                favorable
+            mfe = max(
+                mfe,
+                fav
             )
 
-            max_adverse = min(
-                max_adverse,
-                adverse
+            mae = min(
+                mae,
+                adv
             )
 
             hit_sl = (
@@ -562,24 +641,24 @@ def test_trade(
 
         else:
 
-            favorable = (
+            fav = (
                 entry -
                 row["low"]
             ) / entry
 
-            adverse = (
+            adv = (
                 entry -
                 row["high"]
             ) / entry
 
-            max_favorable = max(
-                max_favorable,
-                favorable
+            mfe = max(
+                mfe,
+                fav
             )
 
-            max_adverse = min(
-                max_adverse,
-                adverse
+            mae = min(
+                mae,
+                adv
             )
 
             hit_sl = (
@@ -590,8 +669,7 @@ def test_trade(
                 row["low"] <= tp
             )
 
-        # Conservative:
-        # if both happen same candle -> SL first
+        # Conservative SL first
         if hit_sl:
 
             result = "SL"
@@ -606,22 +684,19 @@ def test_trade(
 
     if direction == "BUY":
 
-        gross_return = (
+        gross = (
             exit_price -
             entry
         ) / entry
 
     else:
 
-        gross_return = (
+        gross = (
             entry -
             exit_price
         ) / entry
 
-    net_return = (
-        gross_return -
-        COST
-    )
+    net = gross - COST
 
     risk = (
         sl_mult *
@@ -629,166 +704,63 @@ def test_trade(
         entry
     )
 
-    if risk > 0:
-        r_multiple = (
-            net_return /
-            risk
-        )
-    else:
-        r_multiple = 0
+    r = net / risk
 
     return {
         "direction": direction,
         "result": result,
-        "entry_index": entry_index,
+        "entry_index": i,
         "entry_time": d.iloc[
-            entry_index
+            i
         ]["timestamp"],
         "entry": entry,
         "exit": exit_price,
-        "return": net_return,
-        "r": r_multiple,
-        "mfe": max_favorable,
-        "mae": max_adverse
+        "return": net,
+        "r": r,
+        "mfe": mfe,
+        "mae": mae
     }
-
-
-# ============================================================
-# GENERATE SIGNALS
-# ============================================================
-
-def generate_setups(d):
-
-    setups = []
-
-    last_trade_index = -999
-
-    for i in range(
-        SWING_LOOKBACK + 60,
-        len(d) -
-        MAX_HOLD_CANDLES -
-        MAX_CONFIRM_CANDLES -
-        1
-    ):
-
-        if (
-            i -
-            last_trade_index
-            < COOLDOWN_CANDLES
-        ):
-            continue
-
-        row = d.iloc[i]
-
-        trend = row["trend"]
-
-        if trend not in [
-            "UP",
-            "DOWN"
-        ]:
-            continue
-
-        sweep = detect_sweep(
-            d,
-            i
-        )
-
-        if sweep is None:
-            continue
-
-        # 1H direction must match sweep
-        if (
-            trend == "UP"
-            and
-            sweep["direction"] != "BUY"
-        ):
-            continue
-
-        if (
-            trend == "DOWN"
-            and
-            sweep["direction"] != "SELL"
-        ):
-            continue
-
-        setup = confirm_trade(
-            d,
-            sweep
-        )
-
-        if setup is None:
-            continue
-
-        # Prevent confirmation from going too far
-        if (
-            setup["entry_index"] -
-            i >
-            MAX_CONFIRM_CANDLES
-        ):
-            continue
-
-        setups.append(setup)
-
-        last_trade_index = setup[
-            "entry_index"
-        ]
-
-    return setups
-
-
-# ============================================================
-# BACKTEST CONFIG
-# ============================================================
-
-CONFIGS = [
-    (0.75, 0.50),
-    (1.00, 0.50),
-    (1.25, 0.75),
-    (1.50, 1.00),
-    (1.50, 1.25),
-    (2.00, 1.00),
-]
 
 
 # ============================================================
 # SUMMARY
 # ============================================================
 
-def summarize(trades):
+def summary(trades):
 
     if not trades:
         return None
 
-    df = pd.DataFrame(trades)
+    x = pd.DataFrame(trades)
 
-    total = len(df)
+    n = len(x)
 
     tp = (
-        df["result"] == "TP"
+        x["result"] == "TP"
     ).sum()
 
     sl = (
-        df["result"] == "SL"
+        x["result"] == "SL"
     ).sum()
 
     timeout = (
-        df["result"] == "TIMEOUT"
+        x["result"] == "TIMEOUT"
     ).sum()
 
     return {
-        "trades": total,
+        "n": n,
         "tp": tp,
         "sl": sl,
         "timeout": timeout,
-        "tp_pct": tp / total * 100,
-        "sl_pct": sl / total * 100,
-        "timeout_pct": timeout / total * 100,
-        "return_pct": df["return"].sum() * 100,
-        "avg_return": df["return"].mean() * 100,
-        "total_r": df["r"].sum(),
-        "avg_r": df["r"].mean(),
-        "mfe": df["mfe"].mean() * 100,
-        "mae": df["mae"].mean() * 100
+        "tp_pct": tp / n * 100,
+        "sl_pct": sl / n * 100,
+        "timeout_pct": timeout / n * 100,
+        "return": x["return"].sum() * 100,
+        "avg_return": x["return"].mean() * 100,
+        "total_r": x["r"].sum(),
+        "avg_r": x["r"].mean(),
+        "mfe": x["mfe"].mean() * 100,
+        "mae": x["mae"].mean() * 100
     }
 
 
@@ -799,28 +771,35 @@ def summarize(trades):
 def main():
 
     print()
-    print("🚀 BTC Liquidity Sweep Balanced Backtest")
+    print(
+        "🚀 BTC Liquidity Sweep "
+        "Entry Timing Backtest"
+    )
     print()
 
-    df = download_candles()
+    d = download_data()
 
-    print("⚙️ Calculating indicators...")
+    print(
+        "⚙️ Calculating indicators..."
+    )
 
-    df = add_indicators(df)
+    d = indicators(d)
 
-    df = df.dropna().reset_index(
+    d = add_1h_trend(d)
+
+    d = d.dropna().reset_index(
         drop=True
     )
 
     print(
         f"✅ Final usable candles: "
-        f"{len(df)}"
+        f"{len(d)}"
     )
 
-    start_time = df.iloc[0]["timestamp"]
+    start = d.iloc[0]["timestamp"]
 
     train_end = (
-        start_time +
+        start +
         timedelta(days=TRAIN_DAYS)
     )
 
@@ -832,7 +811,7 @@ def main():
     print()
     print(
         f"🧠 Training: "
-        f"{start_time} → {train_end}"
+        f"{start} → {train_end}"
     )
 
     print(
@@ -841,170 +820,169 @@ def main():
     )
 
     print()
-    print("🔎 Generating liquidity sweep setups...")
-
-    setups = generate_setups(df)
-
     print(
-        f"📊 Total setups found: "
-        f"{len(setups)}"
+        "🔎 Finding liquidity sweeps..."
     )
 
-    if len(setups) < MIN_TRAIN_TRADES:
-        print()
-        print(
-            "⚠️ Too few setups."
-        )
-        print(
-            "Need at least "
-            f"{MIN_TRAIN_TRADES} "
-            "training trades."
-        )
-        return
+    sweeps = find_sweeps(d)
 
-    # ========================================================
-    # SPLIT SETUPS
-    # ========================================================
+    print(
+        f"📊 Total sweeps: "
+        f"{len(sweeps)}"
+    )
 
-    train_setups = [
-        s for s in setups
-        if s["entry_index"] <
-        df.index[
-            df["timestamp"] >= train_end
-        ][0]
+    methods = [
+        "SWEEP_CLOSE",
+        "CONFIRM_1",
+        "CONFIRM_2"
     ]
 
-    validation_setups = [
-        s for s in setups
-        if s["entry_index"] >=
-        df.index[
-            df["timestamp"] >= train_end
-        ][0]
+    configs = [
+        (1.00, 0.75),
+        (1.25, 0.75),
+        (1.50, 1.00),
+        (1.50, 1.25),
+        (2.00, 1.00)
     ]
+
+    # ========================================================
+    # TRAINING
+    # ========================================================
 
     print()
     print(
-        f"Training setups: "
-        f"{len(train_setups)}"
+        "================================================"
     )
-
     print(
-        f"Validation setups: "
-        f"{len(validation_setups)}"
+        "TRAINING ENTRY TIMING RESULTS"
+    )
+    print(
+        "================================================"
     )
 
-    print()
-    print("================================================")
-    print("TRAINING RESULTS")
-    print("================================================")
+    positive = []
 
-    positive_configs = []
+    for method in methods:
 
-    for tp, sl in CONFIGS:
+        setups = []
 
-        trades = []
+        for sweep in sweeps:
 
-        for setup in train_setups:
-
-            trade = test_trade(
-                df,
-                setup,
-                tp,
-                sl
+            setup = find_entry(
+                d,
+                sweep,
+                method
             )
 
-            if trade:
-                trades.append(trade)
+            if setup is None:
+                continue
 
-        summary = summarize(
-            trades
-        )
+            time = d.iloc[
+                setup["entry_index"]
+            ]["timestamp"]
 
-        if summary is None:
-            continue
+            if time < train_end:
 
-        print()
-        print(
-            f"TP {tp:.2f} ATR / "
-            f"SL {sl:.2f} ATR"
-        )
-
-        print(
-            f"Trades: {summary['trades']}"
-        )
-
-        print(
-            f"TP: {summary['tp']} "
-            f"({summary['tp_pct']:.1f}%)"
-        )
-
-        print(
-            f"SL: {summary['sl']} "
-            f"({summary['sl_pct']:.1f}%)"
-        )
-
-        print(
-            f"Timeout: {summary['timeout']} "
-            f"({summary['timeout_pct']:.1f}%)"
-        )
-
-        print(
-            f"Return: "
-            f"{summary['return_pct']:.2f}%"
-        )
-
-        print(
-            f"Avg Return: "
-            f"{summary['avg_return']:.3f}%"
-        )
-
-        print(
-            f"Total R: "
-            f"{summary['total_r']:.2f}"
-        )
-
-        print(
-            f"Avg R: "
-            f"{summary['avg_r']:.3f}"
-        )
-
-        print(
-            f"MFE: "
-            f"{summary['mfe']:.3f}%"
-        )
-
-        print(
-            f"MAE: "
-            f"{summary['mae']:.3f}%"
-        )
-
-        if (
-            summary["trades"] >=
-            MIN_TRAIN_TRADES
-            and
-            summary["return_pct"] > 0
-            and
-            summary["avg_r"] > 0
-        ):
-
-            positive_configs.append(
-                (
-                    tp,
-                    sl,
-                    summary
+                setups.append(
+                    setup
                 )
+
+        print()
+        print(
+            f"📌 METHOD: {method}"
+        )
+
+        print(
+            f"Training setups: "
+            f"{len(setups)}"
+        )
+
+        for tp, sl in configs:
+
+            trades = []
+
+            for setup in setups:
+
+                trade = test_trade(
+                    d,
+                    setup,
+                    tp,
+                    sl
+                )
+
+                if trade:
+                    trades.append(
+                        trade
+                    )
+
+            s = summary(trades)
+
+            if s is None:
+                continue
+
+            print()
+            print(
+                f"{method} | "
+                f"TP {tp:.2f} / "
+                f"SL {sl:.2f}"
             )
+
+            print(
+                f"Trades: {s['n']} | "
+                f"TP {s['tp_pct']:.1f}% | "
+                f"SL {s['sl_pct']:.1f}% | "
+                f"Timeout {s['timeout_pct']:.1f}%"
+            )
+
+            print(
+                f"Return: "
+                f"{s['return']:.2f}% | "
+                f"Avg R: "
+                f"{s['avg_r']:.3f} | "
+                f"Total R: "
+                f"{s['total_r']:.2f}"
+            )
+
+            print(
+                f"MFE: "
+                f"{s['mfe']:.3f}% | "
+                f"MAE: "
+                f"{s['mae']:.3f}%"
+            )
+
+            if (
+                s["n"] >= MIN_TRAIN_TRADES
+                and
+                s["return"] > 0
+                and
+                s["avg_r"] > 0
+            ):
+
+                positive.append(
+                    (
+                        method,
+                        tp,
+                        sl,
+                        s
+                    )
+                )
 
     # ========================================================
     # VALIDATION
     # ========================================================
 
     print()
-    print("================================================")
-    print("VALIDATION")
-    print("================================================")
+    print(
+        "================================================"
+    )
+    print(
+        "VALIDATION"
+    )
+    print(
+        "================================================"
+    )
 
-    if not positive_configs:
+    if not positive:
 
         print()
         print(
@@ -1012,29 +990,45 @@ def main():
         )
 
         print(
-            "Validation is intentionally NOT forced."
+            "Validation is NOT forced."
         )
 
         return
 
-    # Best training config
-    positive_configs.sort(
-        key=lambda x: x[2]["avg_r"],
+    positive.sort(
+        key=lambda x: x[3]["avg_r"],
         reverse=True
     )
 
-    best_tp, best_sl, best_train = (
-        positive_configs[0]
+    best_method, best_tp, best_sl, best_train = (
+        positive[0]
     )
 
     print()
     print(
-        f"🏆 Best training setup:"
+        "🏆 Best training configuration:"
     )
 
     print(
-        f"TP {best_tp:.2f} ATR / "
-        f"SL {best_sl:.2f} ATR"
+        f"Method: {best_method}"
+    )
+
+    print(
+        f"TP: {best_tp:.2f} ATR"
+    )
+
+    print(
+        f"SL: {best_sl:.2f} ATR"
+    )
+
+    print(
+        f"Training trades: "
+        f"{best_train['n']}"
+    )
+
+    print(
+        f"Training return: "
+        f"{best_train['return']:.2f}%"
     )
 
     print(
@@ -1042,104 +1036,123 @@ def main():
         f"{best_train['avg_r']:.3f}"
     )
 
-    print(
-        f"Training Return: "
-        f"{best_train['return_pct']:.2f}%"
-    )
+    # Build validation setups
+    val_setups = []
 
-    validation_trades = []
+    for sweep in sweeps:
 
-    for setup in validation_setups:
+        setup = find_entry(
+            d,
+            sweep,
+            best_method
+        )
+
+        if setup is None:
+            continue
+
+        time = d.iloc[
+            setup["entry_index"]
+        ]["timestamp"]
+
+        if (
+            time >= train_end
+            and
+            time <= validation_end
+        ):
+
+            val_setups.append(
+                setup
+            )
+
+    trades = []
+
+    for setup in val_setups:
 
         trade = test_trade(
-            df,
+            d,
             setup,
             best_tp,
             best_sl
         )
 
         if trade:
-            validation_trades.append(
+            trades.append(
                 trade
             )
 
-    print()
+    if len(trades) < MIN_VALIDATION_TRADES:
 
-    if len(validation_trades) < MIN_VALIDATION_TRADES:
-
+        print()
         print(
-            "⚠️ Validation sample too small."
+            "⚠️ Validation sample too small:"
         )
 
         print(
-            f"Only {len(validation_trades)} "
-            "validation trades."
+            f"{len(trades)} trades"
         )
 
         return
 
-    val = summarize(
-        validation_trades
+    v = summary(trades)
+
+    print()
+    print(
+        "🧪 VALIDATION RESULT"
     )
 
     print(
-        f"Validation Trades: "
-        f"{val['trades']}"
+        f"Trades: {v['n']}"
     )
 
     print(
-        f"TP: {val['tp']} "
-        f"({val['tp_pct']:.1f}%)"
+        f"TP: {v['tp']} "
+        f"({v['tp_pct']:.1f}%)"
     )
 
     print(
-        f"SL: {val['sl']} "
-        f"({val['sl_pct']:.1f}%)"
+        f"SL: {v['sl']} "
+        f"({v['sl_pct']:.1f}%)"
     )
 
     print(
-        f"Timeout: {val['timeout']} "
-        f"({val['timeout_pct']:.1f}%)"
+        f"Timeout: {v['timeout']} "
+        f"({v['timeout_pct']:.1f}%)"
     )
 
     print(
         f"Return: "
-        f"{val['return_pct']:.2f}%"
+        f"{v['return']:.2f}%"
     )
 
     print(
         f"Avg Return: "
-        f"{val['avg_return']:.3f}%"
+        f"{v['avg_return']:.3f}%"
     )
 
     print(
         f"Total R: "
-        f"{val['total_r']:.2f}"
+        f"{v['total_r']:.2f}"
     )
 
     print(
         f"Avg R: "
-        f"{val['avg_r']:.3f}"
+        f"{v['avg_r']:.3f}"
     )
 
     print(
         f"MFE: "
-        f"{val['mfe']:.3f}%"
+        f"{v['mfe']:.3f}%"
     )
 
     print(
         f"MAE: "
-        f"{val['mae']:.3f}%"
+        f"{v['mae']:.3f}%"
     )
 
-    # ========================================================
-    # SAVE VALIDATION TRADES
-    # ========================================================
-
     pd.DataFrame(
-        validation_trades
+        trades
     ).to_csv(
-        "btc_liquidity_sweep_balanced_validation.csv",
+        "btc_entry_timing_validation.csv",
         index=False
     )
 
@@ -1149,35 +1162,30 @@ def main():
     )
 
     print(
-        "btc_liquidity_sweep_balanced_validation.csv"
+        "btc_entry_timing_validation.csv"
     )
 
-    print()
-
     if (
-        val["return_pct"] > 0
+        v["return"] > 0
         and
-        val["avg_r"] > 0
+        v["avg_r"] > 0
     ):
 
+        print()
         print(
             "🟢 VALIDATION POSITIVE"
         )
 
-        print(
-            "This setup may be worth "
-            "further testing."
-        )
-
     else:
 
+        print()
         print(
             "🔴 VALIDATION NEGATIVE"
         )
 
         print(
-            "Do NOT use this setup "
-            "in the live bot yet."
+            "Do NOT use this setup in "
+            "the live bot yet."
         )
 
 
