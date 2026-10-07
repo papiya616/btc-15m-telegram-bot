@@ -4,46 +4,24 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 
 # =========================================================
-# BTC 15M BREAKOUT + RETEST BACKTEST
+# BTC 15M MARKET-STATE / OPPORTUNITY SCAN
 # =========================================================
 
 PRODUCT = "BTC-USD"
-GRANULARITY = 900  # 15 minutes
+GRANULARITY = 900
 
 TOTAL_DAYS = 183
-TRAIN_DAYS = 120
-VALIDATION_DAYS = 63
-
 CHUNK_DAYS = 3
 
-LOOKBACK = 20
+EMA_FAST = 20
+EMA_SLOW = 50
 ATR_PERIOD = 14
-
-# Breakout must exceed level by this ATR amount
-BREAKOUT_ATR = 0.10
-
-# Retest can happen within these candles
-RETEST_MIN = 1
-RETEST_MAX = 4
-
-# Retest tolerance around breakout level
-RETEST_ATR = 0.20
-
-# Maximum trade duration
-MAX_HOLD_CANDLES = 12   # 3 hours
-
-# Minimum time between trades
-COOLDOWN_CANDLES = 12   # 3 hours
-
-# Estimated round-trip cost
-COST = 0.0014  # 0.14%
-
-MIN_TRAIN_TRADES = 30
-MIN_VALIDATION_TRADES = 20
+RSI_PERIOD = 14
+LOOKBACK = 20
 
 
 # =========================================================
-# DOWNLOAD DATA
+# DOWNLOAD
 # =========================================================
 
 def download_chunk(start_dt, end_dt):
@@ -74,13 +52,12 @@ def download_chunk(start_dt, end_dt):
 
 def download_data():
 
-    print("📥 Downloading BTC 15M data...")
+    print("\n📥 Downloading BTC 15M data...")
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=TOTAL_DAYS)
 
     chunks = []
-
     current = start
 
     while current < end:
@@ -114,7 +91,9 @@ def download_data():
         current = chunk_end
 
     if not chunks:
-        raise RuntimeError("No BTC data downloaded.")
+        raise RuntimeError(
+            "No data downloaded."
+        )
 
     df = pd.DataFrame(
         chunks,
@@ -141,6 +120,7 @@ def download_data():
         "close",
         "volume"
     ]:
+
         df[col] = pd.to_numeric(
             df[col],
             errors="coerce"
@@ -154,7 +134,9 @@ def download_data():
         .reset_index(drop=True)
     )
 
-    print(f"✅ Total candles: {len(df)}")
+    print(
+        f"✅ Total candles: {len(df)}"
+    )
 
     return df
 
@@ -167,23 +149,27 @@ def calculate_indicators(df):
 
     d = df.copy()
 
-    print("⚙️ Calculating indicators...")
+    print(
+        "⚙️ Calculating market conditions..."
+    )
 
     # EMA
     d["ema20"] = d["close"].ewm(
-        span=20,
+        span=EMA_FAST,
         adjust=False
     ).mean()
 
     d["ema50"] = d["close"].ewm(
-        span=50,
+        span=EMA_SLOW,
         adjust=False
     ).mean()
 
     # ATR
     prev_close = d["close"].shift(1)
 
-    tr1 = d["high"] - d["low"]
+    tr1 = (
+        d["high"] - d["low"]
+    )
 
     tr2 = (
         d["high"] - prev_close
@@ -204,19 +190,47 @@ def calculate_indicators(df):
         .mean()
     )
 
-    # Candle properties
-    d["body"] = (
-        d["close"] - d["open"]
-    ).abs()
-
-    d["range"] = (
-        d["high"] - d["low"]
+    # ATR percentage
+    d["atr_pct"] = (
+        d["atr"]
+        / d["close"]
+        * 100
     )
 
-    d["body_ratio"] = np.where(
-        d["range"] > 0,
-        d["body"] / d["range"],
-        0
+    # RSI
+    delta = d["close"].diff()
+
+    gain = delta.clip(
+        lower=0
+    )
+
+    loss = -delta.clip(
+        upper=0
+    )
+
+    avg_gain = (
+        gain
+        .rolling(RSI_PERIOD)
+        .mean()
+    )
+
+    avg_loss = (
+        loss
+        .rolling(RSI_PERIOD)
+        .mean()
+    )
+
+    rs = avg_gain / avg_loss.replace(
+        0,
+        np.nan
+    )
+
+    d["rsi"] = (
+        100
+        - (
+            100
+            / (1 + rs)
+        )
     )
 
     # Volume
@@ -226,58 +240,143 @@ def calculate_indicators(df):
         .mean()
     )
 
-    d["volume_ratio"] = np.where(
-        d["volume_ma"] > 0,
-        d["volume"] / d["volume_ma"],
+    d["volume_ratio"] = (
+        d["volume"]
+        / d["volume_ma"]
+    )
+
+    # Candle
+    d["body"] = (
+        d["close"]
+        - d["open"]
+    ).abs()
+
+    d["range"] = (
+        d["high"]
+        - d["low"]
+    )
+
+    d["body_ratio"] = np.where(
+        d["range"] > 0,
+        d["body"] / d["range"],
         0
     )
 
-    # Previous 20-candle resistance/support
-    d["resistance"] = (
+    # Recent range
+    d["range_high"] = (
         d["high"]
         .shift(1)
         .rolling(LOOKBACK)
         .max()
     )
 
-    d["support"] = (
+    d["range_low"] = (
         d["low"]
         .shift(1)
         .rolling(LOOKBACK)
         .min()
     )
 
-    # Breakout levels
-    d["breakout_up"] = (
-        d["resistance"]
-        + d["atr"] * BREAKOUT_ATR
+    d["range_width_pct"] = (
+        (
+            d["range_high"]
+            - d["range_low"]
+        )
+        / d["close"]
+        * 100
     )
 
-    d["breakout_down"] = (
-        d["support"]
-        - d["atr"] * BREAKOUT_ATR
+    # EMA distance
+    d["ema_distance_atr"] = (
+        (
+            d["close"]
+            - d["ema20"]
+        )
+        / d["atr"]
     )
 
-    # Trend
-    d["trend"] = "SIDEWAYS"
+    # Trend strength
+    d["ema_gap_atr"] = (
+        (
+            d["ema20"]
+            - d["ema50"]
+        )
+        / d["atr"]
+    )
 
+    # =====================================================
+    # MARKET STATE
+    # =====================================================
+
+    d["state"] = "OTHER"
+
+    # Strong uptrend
     d.loc[
         (
             (d["close"] > d["ema20"]) &
-            (d["ema20"] > d["ema50"])
+            (d["ema20"] > d["ema50"]) &
+            (d["ema_gap_atr"] >= 0.50)
         ),
-        "trend"
-    ] = "UP"
+        "state"
+    ] = "STRONG_UP"
 
+    # Normal uptrend
+    d.loc[
+        (
+            (d["close"] > d["ema20"]) &
+            (d["ema20"] > d["ema50"]) &
+            (d["ema_gap_atr"] < 0.50)
+        ),
+        "state"
+    ] = "NORMAL_UP"
+
+    # Strong downtrend
     d.loc[
         (
             (d["close"] < d["ema20"]) &
-            (d["ema20"] < d["ema50"])
+            (d["ema20"] < d["ema50"]) &
+            (d["ema_gap_atr"] <= -0.50)
         ),
-        "trend"
-    ] = "DOWN"
+        "state"
+    ] = "STRONG_DOWN"
 
-    d = d.dropna().reset_index(drop=True)
+    # Normal downtrend
+    d.loc[
+        (
+            (d["close"] < d["ema20"]) &
+            (d["ema20"] < d["ema50"]) &
+            (d["ema_gap_atr"] > -0.50)
+        ),
+        "state"
+    ] = "NORMAL_DOWN"
+
+    # Range / sideways
+    d.loc[
+        (
+            d["range_width_pct"] < 2.0
+        ),
+        "state"
+    ] = "RANGE"
+
+    # High volatility
+    d.loc[
+        (
+            d["atr_pct"] >= 0.60
+        ),
+        "state"
+    ] = "HIGH_VOL"
+
+    # Low volatility
+    d.loc[
+        (
+            d["atr_pct"] <= 0.20
+        ),
+        "state"
+    ] = "LOW_VOL"
+
+    d = d.dropna().reset_index(
+        drop=True
+    )
 
     print(
         f"✅ Final usable candles: {len(d)}"
@@ -287,607 +386,515 @@ def calculate_indicators(df):
 
 
 # =========================================================
-# FIND BREAKOUTS
+# FUTURE MARKET MOVEMENT
 # =========================================================
 
-def find_breakouts(d, start_idx, end_idx):
-
-    events = []
-
-    i = start_idx
-
-    while i < end_idx:
-
-        row = d.iloc[i]
-
-        atr = row["atr"]
-
-        if not np.isfinite(atr) or atr <= 0:
-            i += 1
-            continue
-
-        # -------------------------------------------------
-        # BULLISH BREAKOUT
-        # -------------------------------------------------
-
-        if (
-            row["trend"] == "UP"
-            and row["close"] > row["breakout_up"]
-            and row["close"] > row["open"]
-            and row["body_ratio"] >= 0.40
-        ):
-
-            level = row["resistance"]
-
-            events.append({
-                "index": i,
-                "direction": "BUY",
-                "level": level
-            })
-
-            i += 1
-            continue
-
-        # -------------------------------------------------
-        # BEARISH BREAKOUT
-        # -------------------------------------------------
-
-        if (
-            row["trend"] == "DOWN"
-            and row["close"] < row["breakout_down"]
-            and row["close"] < row["open"]
-            and row["body_ratio"] >= 0.40
-        ):
-
-            level = row["support"]
-
-            events.append({
-                "index": i,
-                "direction": "SELL",
-                "level": level
-            })
-
-        i += 1
-
-    return events
-
-
-# =========================================================
-# FIND RETEST ENTRY
-# =========================================================
-
-def find_retest_entry(
-    d,
-    breakout_idx,
-    direction,
-    level,
-    end_idx
-):
-
-    last_idx = min(
-        breakout_idx + RETEST_MAX,
-        end_idx - 1
-    )
-
-    first_idx = (
-        breakout_idx + RETEST_MIN
-    )
-
-    if first_idx > last_idx:
-        return None
-
-    for j in range(
-        first_idx,
-        last_idx + 1
-    ):
-
-        row = d.iloc[j]
-
-        atr = row["atr"]
-
-        if not np.isfinite(atr) or atr <= 0:
-            continue
-
-        tolerance = atr * RETEST_ATR
-
-        # =============================================
-        # BUY RETEST
-        # =============================================
-
-        if direction == "BUY":
-
-            touched = (
-                row["low"]
-                <= level + tolerance
-            )
-
-            reclaimed = (
-                row["close"] > level
-            )
-
-            bullish = (
-                row["close"] > row["open"]
-            )
-
-            good_body = (
-                row["body_ratio"] >= 0.35
-            )
-
-            # Avoid weak retest
-            volume_ok = (
-                row["volume_ratio"] >= 0.80
-            )
-
-            trend_ok = (
-                row["close"] > row["ema20"]
-            )
-
-            if (
-                touched
-                and reclaimed
-                and bullish
-                and good_body
-                and volume_ok
-                and trend_ok
-            ):
-
-                return j
-
-        # =============================================
-        # SELL RETEST
-        # =============================================
-
-        else:
-
-            touched = (
-                row["high"]
-                >= level - tolerance
-            )
-
-            rejected = (
-                row["close"] < level
-            )
-
-            bearish = (
-                row["close"] < row["open"]
-            )
-
-            good_body = (
-                row["body_ratio"] >= 0.35
-            )
-
-            volume_ok = (
-                row["volume_ratio"] >= 0.80
-            )
-
-            trend_ok = (
-                row["close"] < row["ema20"]
-            )
-
-            if (
-                touched
-                and rejected
-                and bearish
-                and good_body
-                and volume_ok
-                and trend_ok
-            ):
-
-                return j
-
-    return None
-
-
-# =========================================================
-# SIMULATE TRADE
-# =========================================================
-
-def simulate_trade(
-    d,
-    entry_idx,
-    direction,
-    tp_atr,
-    sl_atr,
-    end_idx
-):
-
-    entry = d.iloc[entry_idx]
-
-    entry_price = entry["close"]
-    atr = entry["atr"]
-
-    if not np.isfinite(atr) or atr <= 0:
-        return None
-
-    if direction == "BUY":
-
-        tp = entry_price + (
-            atr * tp_atr
-        )
-
-        sl = entry_price - (
-            atr * sl_atr
-        )
-
-    else:
-
-        tp = entry_price - (
-            atr * tp_atr
-        )
-
-        sl = entry_price + (
-            atr * sl_atr
-        )
-
-    last_idx = min(
-        entry_idx + MAX_HOLD_CANDLES,
-        end_idx - 1
-    )
-
-    mfe = 0.0
-    mae = 0.0
-
-    result = "TIMEOUT"
-    exit_price = d.iloc[last_idx]["close"]
-    exit_idx = last_idx
-
-    for j in range(
-        entry_idx + 1,
-        last_idx + 1
-    ):
-
-        row = d.iloc[j]
-
-        if direction == "BUY":
-
-            favorable = (
-                row["high"] - entry_price
-            ) / entry_price
-
-            adverse = (
-                row["low"] - entry_price
-            ) / entry_price
-
-            mfe = max(
-                mfe,
-                favorable
-            )
-
-            mae = min(
-                mae,
-                adverse
-            )
-
-            hit_sl = (
-                row["low"] <= sl
-            )
-
-            hit_tp = (
-                row["high"] >= tp
-            )
-
-        else:
-
-            favorable = (
-                entry_price - row["low"]
-            ) / entry_price
-
-            adverse = (
-                entry_price - row["high"]
-            ) / entry_price
-
-            mfe = max(
-                mfe,
-                favorable
-            )
-
-            mae = min(
-                mae,
-                adverse
-            )
-
-            hit_sl = (
-                row["high"] >= sl
-            )
-
-            hit_tp = (
-                row["low"] <= tp
-            )
-
-        # Conservative assumption:
-        # if TP and SL hit same candle,
-        # SL is counted first.
-
-        if hit_sl:
-
-            result = "SL"
-            exit_price = sl
-            exit_idx = j
-            break
-
-        if hit_tp:
-
-            result = "TP"
-            exit_price = tp
-            exit_idx = j
-            break
-
-        exit_price = row["close"]
-        exit_idx = j
-
-    if direction == "BUY":
-
-        gross_return = (
-            exit_price - entry_price
-        ) / entry_price
-
-    else:
-
-        gross_return = (
-            entry_price - exit_price
-        ) / entry_price
-
-    net_return = (
-        gross_return - COST
-    )
-
-    # R calculation
-    if result == "TP":
-        r_value = (
-            tp_atr / sl_atr
-        )
-
-    elif result == "SL":
-        r_value = -1.0
-
-    else:
-
-        risk = (
-            atr * sl_atr
-        ) / entry_price
-
-        if risk > 0:
-            r_value = (
-                gross_return / risk
-            )
-        else:
-            r_value = 0.0
-
-    return {
-        "entry_time": entry["time"],
-        "exit_time": d.iloc[exit_idx]["time"],
-        "direction": direction,
-        "entry": entry_price,
-        "exit": exit_price,
-        "result": result,
-        "gross_return": gross_return,
-        "net_return": net_return,
-        "r": r_value,
-        "mfe": mfe,
-        "mae": mae,
-        "tp_atr": tp_atr,
-        "sl_atr": sl_atr
+def calculate_forward_returns(d):
+
+    horizons = {
+        15: 1,
+        30: 2,
+        60: 4,
+        120: 8
     }
 
+    for minutes, candles in horizons.items():
 
-# =========================================================
-# RUN BACKTEST
-# =========================================================
+        d[
+            f"future_{minutes}"
+        ] = (
+            d["close"].shift(-candles)
+            / d["close"]
+            - 1
+        )
 
-def run_backtest(
-    d,
-    start_idx,
-    end_idx,
-    tp_atr,
-    sl_atr
-):
+    # Maximum favorable/adverse movement
+    # over next 3 hours
 
-    events = find_breakouts(
-        d,
-        start_idx,
-        end_idx
+    future_highs = []
+
+    future_lows = []
+
+    close_values = (
+        d["close"].values
     )
 
-    trades = []
+    high_values = (
+        d["high"].values
+    )
 
-    last_trade_idx = -999999
+    low_values = (
+        d["low"].values
+    )
 
-    for event in events:
+    n = len(d)
 
-        breakout_idx = event["index"]
+    for i in range(n):
 
-        if (
-            breakout_idx
-            <= last_trade_idx
-        ):
-            continue
-
-        direction = event["direction"]
-        level = event["level"]
-
-        entry_idx = find_retest_entry(
-            d,
-            breakout_idx,
-            direction,
-            level,
-            end_idx
+        end = min(
+            i + 13,
+            n
         )
 
-        if entry_idx is None:
+        if i + 1 >= n:
+
+            future_highs.append(
+                np.nan
+            )
+
+            future_lows.append(
+                np.nan
+            )
+
             continue
 
-        if (
-            entry_idx
-            - last_trade_idx
-            < COOLDOWN_CANDLES
-        ):
-            continue
-
-        trade = simulate_trade(
-            d,
-            entry_idx,
-            direction,
-            tp_atr,
-            sl_atr,
-            end_idx
-        )
-
-        if trade is None:
-            continue
-
-        trade["breakout_time"] = (
-            d.iloc[breakout_idx]["time"]
-        )
-
-        trade["level"] = level
-
-        trades.append(trade)
-
-        last_trade_idx = (
-            trade_index_after_exit(
-                d,
-                trade["exit_time"]
+        future_highs.append(
+            np.max(
+                high_values[
+                    i + 1:end
+                ]
             )
         )
 
-    return trades
-
-
-def trade_index_after_exit(
-    d,
-    exit_time
-):
-
-    matches = d.index[
-        d["time"] == exit_time
-    ]
-
-    if len(matches) == 0:
-        return -999999
-
-    return int(matches[0])
-
-
-# =========================================================
-# RESULTS
-# =========================================================
-
-def print_results(
-    method_name,
-    trades,
-    tp_atr,
-    sl_atr
-):
-
-    if not trades:
-        print(
-            f"{method_name} | "
-            f"TP {tp_atr:.2f} / SL {sl_atr:.2f}"
+        future_lows.append(
+            np.min(
+                low_values[
+                    i + 1:end
+                ]
+            )
         )
-        print("Trades: 0")
-        return
 
-    df = pd.DataFrame(trades)
-
-    total = len(df)
-
-    tp = (
-        df["result"] == "TP"
-    ).sum()
-
-    sl = (
-        df["result"] == "SL"
-    ).sum()
-
-    timeout = (
-        df["result"] == "TIMEOUT"
-    ).sum()
-
-    tp_pct = tp / total * 100
-    sl_pct = sl / total * 100
-    timeout_pct = timeout / total * 100
-
-    total_return = (
-        df["net_return"].sum()
-        * 100
+    d["future_high_3h"] = (
+        future_highs
     )
 
-    avg_return = (
-        df["net_return"].mean()
-        * 100
+    d["future_low_3h"] = (
+        future_lows
     )
 
-    total_r = df["r"].sum()
-    avg_r = df["r"].mean()
-
-    mfe = (
-        df["mfe"].mean()
-        * 100
+    d["mfe_up_3h"] = (
+        d["future_high_3h"]
+        / d["close"]
+        - 1
     )
 
-    mae = (
-        df["mae"].mean()
-        * 100
+    d["mfe_down_3h"] = (
+        d["future_low_3h"]
+        / d["close"]
+        - 1
     )
 
-    print(
-        f"\n{method_name} | "
-        f"TP {tp_atr:.2f} / SL {sl_atr:.2f}"
-    )
-
-    print(
-        f"Trades: {total} | "
-        f"TP {tp_pct:.1f}% | "
-        f"SL {sl_pct:.1f}% | "
-        f"Timeout {timeout_pct:.1f}%"
-    )
-
-    print(
-        f"Return: {total_return:.2f}% | "
-        f"Avg Return: {avg_return:.3f}% | "
-        f"Avg R: {avg_r:.3f} | "
-        f"Total R: {total_r:.2f}"
-    )
-
-    print(
-        f"MFE: {mfe:.3f}% | "
-        f"MAE: {mae:.3f}%"
-    )
+    return d
 
 
 # =========================================================
-# MAIN
+# STATE ANALYSIS
+# =========================================================
+
+def analyze_states(
+    d,
+    start_time,
+    end_time,
+    title
+):
+
+    x = d[
+        (
+            d["time"] >= start_time
+        )
+        &
+        (
+            d["time"] < end_time
+        )
+    ].copy()
+
+    print(
+        "\n"
+        "================================================"
+    )
+
+    print(title)
+
+    print(
+        "================================================"
+    )
+
+    states = sorted(
+        x["state"].dropna().unique()
+    )
+
+    rows = []
+
+    for state in states:
+
+        s = x[
+            x["state"] == state
+        ].copy()
+
+        if len(s) < 20:
+            continue
+
+        row = {
+            "state": state,
+            "samples": len(s)
+        }
+
+        for minutes in [
+            15,
+            30,
+            60,
+            120
+        ]:
+
+            col = (
+                f"future_{minutes}"
+            )
+
+            values = s[col].dropna()
+
+            if len(values) == 0:
+                continue
+
+            row[
+                f"avg_{minutes}"
+            ] = values.mean() * 100
+
+            row[
+                f"up_{minutes}"
+            ] = (
+                values > 0
+            ).mean() * 100
+
+            row[
+                f"down_{minutes}"
+            ] = (
+                values < 0
+            ).mean() * 100
+
+        mfe_up = (
+            s["mfe_up_3h"]
+            .dropna()
+        )
+
+        mfe_down = (
+            s["mfe_down_3h"]
+            .dropna()
+        )
+
+        row["avg_mfe_up_3h"] = (
+            mfe_up.mean() * 100
+        )
+
+        row["avg_mfe_down_3h"] = (
+            mfe_down.mean() * 100
+        )
+
+        # Probability of useful movement
+        row["up_30_3h"] = (
+            mfe_up >= 0.003
+        ).mean() * 100
+
+        row["down_30_3h"] = (
+            mfe_down <= -0.003
+        ).mean() * 100
+
+        row["up_50_3h"] = (
+            mfe_up >= 0.005
+        ).mean() * 100
+
+        row["down_50_3h"] = (
+            mfe_down <= -0.005
+        ).mean() * 100
+
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+
+    if result.empty:
+
+        print(
+            "No sufficient data."
+        )
+
+        return result
+
+    for _, r in result.iterrows():
+
+        print(
+            f"\n📌 {r['state']}"
+        )
+
+        print(
+            f"Samples: {int(r['samples'])}"
+        )
+
+        for minutes in [
+            15,
+            30,
+            60,
+            120
+        ]:
+
+            avg = r.get(
+                f"avg_{minutes}",
+                np.nan
+            )
+
+            up = r.get(
+                f"up_{minutes}",
+                np.nan
+            )
+
+            down = r.get(
+                f"down_{minutes}",
+                np.nan
+            )
+
+            print(
+                f"{minutes}M | "
+                f"Avg {avg:+.3f}% | "
+                f"UP {up:.1f}% | "
+                f"DOWN {down:.1f}%"
+            )
+
+        print(
+            f"3H favorable +0.30%: "
+            f"{r['up_30_3h']:.1f}%"
+        )
+
+        print(
+            f"3H favorable -0.30%: "
+            f"{r['down_30_3h']:.1f}%"
+        )
+
+        print(
+            f"3H favorable +0.50%: "
+            f"{r['up_50_3h']:.1f}%"
+        )
+
+        print(
+            f"3H favorable -0.50%: "
+            f"{r['down_50_3h']:.1f}%"
+        )
+
+    return result
+
+
+# =========================================================
+# DETAILED CONDITION ANALYSIS
+# =========================================================
+
+def analyze_conditions(
+    d,
+    start_time,
+    end_time
+):
+
+    x = d[
+        (
+            d["time"] >= start_time
+        )
+        &
+        (
+            d["time"] < end_time
+        )
+    ].copy()
+
+    print(
+        "\n"
+        "================================================"
+    )
+
+    print(
+        "CONDITION SCAN"
+    )
+
+    print(
+        "================================================"
+    )
+
+    conditions = {
+
+        "RSI_LT35":
+            x["rsi"] < 35,
+
+        "RSI_35_45":
+            (
+                (x["rsi"] >= 35)
+                &
+                (x["rsi"] < 45)
+            ),
+
+        "RSI_45_55":
+            (
+                (x["rsi"] >= 45)
+                &
+                (x["rsi"] < 55)
+            ),
+
+        "RSI_55_65":
+            (
+                (x["rsi"] >= 55)
+                &
+                (x["rsi"] < 65)
+            ),
+
+        "RSI_GT65":
+            x["rsi"] > 65,
+
+        "HIGH_VOLUME":
+            x["volume_ratio"] >= 1.2,
+
+        "LOW_VOLUME":
+            x["volume_ratio"] <= 0.8,
+
+        "PRICE_ABOVE_EMA":
+            x["ema_distance_atr"] > 0.5,
+
+        "PRICE_BELOW_EMA":
+            x["ema_distance_atr"] < -0.5,
+
+        "NEAR_EMA":
+            x["ema_distance_atr"].abs() < 0.25,
+
+        "STRONG_BODY":
+            x["body_ratio"] >= 0.60,
+
+        "WEAK_BODY":
+            x["body_ratio"] < 0.30,
+
+        "HIGH_VOLATILITY":
+            x["atr_pct"] >= 0.60,
+
+        "LOW_VOLATILITY":
+            x["atr_pct"] <= 0.20
+    }
+
+    rows = []
+
+    for name, mask in conditions.items():
+
+        s = x[mask].copy()
+
+        if len(s) < 30:
+            continue
+
+        future = (
+            s["future_60"]
+            .dropna()
+        )
+
+        if len(future) == 0:
+            continue
+
+        rows.append({
+            "condition": name,
+            "samples": len(s),
+            "avg_60m": (
+                future.mean() * 100
+            ),
+            "up_60m": (
+                (future > 0)
+                .mean() * 100
+            ),
+            "down_60m": (
+                (future < 0)
+                .mean() * 100
+            ),
+            "up_30_3h": (
+                (
+                    s["mfe_up_3h"]
+                    >= 0.003
+                )
+                .mean()
+                * 100
+            ),
+            "down_30_3h": (
+                (
+                    s["mfe_down_3h"]
+                    <= -0.003
+                )
+                .mean()
+                * 100
+            )
+        })
+
+    result = pd.DataFrame(rows)
+
+    if result.empty:
+        print(
+            "No conditions with enough data."
+        )
+        return result
+
+    result = result.sort_values(
+        "avg_60m",
+        ascending=False
+    )
+
+    print(
+        "\n📈 BEST CONDITIONS FOR UP MOVEMENT"
+    )
+
+    for _, r in result.head(7).iterrows():
+
+        print(
+            f"{r['condition']} | "
+            f"N={int(r['samples'])} | "
+            f"60M Avg={r['avg_60m']:+.3f}% | "
+            f"UP={r['up_60m']:.1f}% | "
+            f"+0.30% in 3H="
+            f"{r['up_30_3h']:.1f}%"
+        )
+
+    print(
+        "\n📉 BEST CONDITIONS FOR DOWN MOVEMENT"
+    )
+
+    result_down = result.sort_values(
+        "avg_60m",
+        ascending=True
+    )
+
+    for _, r in result_down.head(7).iterrows():
+
+        print(
+            f"{r['condition']} | "
+            f"N={int(r['samples'])} | "
+            f"60M Avg={r['avg_60m']:+.3f}% | "
+            f"DOWN={r['down_60m']:.1f}% | "
+            f"-0.30% in 3H="
+            f"{r['down_30_3h']:.1f}%"
+        )
+
+    return result
+
+
+# =========================================================
+# SAVE
 # =========================================================
 
 def main():
 
     print(
         "\n🚀 BTC 15M "
-        "Breakout + Retest Backtest\n"
+        "Market-State / Opportunity Scan\n"
     )
 
     d = download_data()
 
     d = calculate_indicators(d)
 
-    if len(d) < 500:
-
-        raise RuntimeError(
-            "Not enough candles."
-        )
+    d = calculate_forward_returns(d)
 
     first_time = d["time"].iloc[0]
     last_time = d["time"].iloc[-1]
 
-    train_end_time = (
+    train_end = (
         first_time
         + pd.Timedelta(
-            days=TRAIN_DAYS
+            days=120
         )
-    )
-
-    validation_start = (
-        train_end_time
     )
 
     validation_end = last_time
@@ -896,249 +903,84 @@ def main():
         "\n🧠 Training:",
         first_time,
         "→",
-        train_end_time
+        train_end
     )
 
     print(
         "🧪 Validation:",
-        validation_start,
+        train_end,
         "→",
         validation_end
-    )
-
-    train_start_idx = 100
-
-    train_end_idx = (
-        d["time"] < train_end_time
-    ).sum()
-
-    validation_start_idx = (
-        d["time"] >= validation_start
-    ).idxmax()
-
-    validation_end_idx = len(d)
-
-    # =====================================================
-    # TEST CONFIGS
-    # =====================================================
-
-    configs = [
-        (1.00, 0.75),
-        (1.25, 0.75),
-        (1.50, 1.00),
-        (1.50, 1.25),
-        (2.00, 1.00),
-    ]
-
-    print(
-        "\n🔎 Finding Breakout + Retest setups..."
     )
 
     # =====================================================
     # TRAINING
     # =====================================================
 
-    print(
-        "\n"
-        "================================================"
+    train_states = analyze_states(
+        d,
+        first_time,
+        train_end,
+        "TRAINING MARKET STATES"
     )
 
-    print(
-        "TRAINING BREAKOUT + RETEST RESULTS"
-    )
-
-    print(
-        "================================================"
-    )
-
-    positive_configs = []
-
-    all_training_trades = []
-
-    for tp_atr, sl_atr in configs:
-
-        trades = run_backtest(
-            d,
-            train_start_idx,
-            train_end_idx,
-            tp_atr,
-            sl_atr
-        )
-
-        all_training_trades.extend(
-            trades
-        )
-
-        if trades:
-
-            print_results(
-                "BREAKOUT_RETEST",
-                trades,
-                tp_atr,
-                sl_atr
-            )
-
-            temp = pd.DataFrame(
-                trades
-            )
-
-            if len(temp) >= MIN_TRAIN_TRADES:
-
-                avg_r = temp["r"].mean()
-
-                total_return = (
-                    temp["net_return"].sum()
-                )
-
-                if (
-                    avg_r > 0
-                    and total_return > 0
-                ):
-
-                    positive_configs.append(
-                        (
-                            tp_atr,
-                            sl_atr,
-                            avg_r,
-                            total_return,
-                            len(temp)
-                        )
-                    )
-
-    # =====================================================
-    # TRAINING DECISION
-    # =====================================================
-
-    print(
-        "\n"
-        "================================================"
-    )
-
-    print(
-        "TRAINING DECISION"
-    )
-
-    print(
-        "================================================"
-    )
-
-    if not positive_configs:
-
-        print(
-            "\n❌ No positive training configuration."
-        )
-
-        print(
-            "Validation is NOT forced."
-        )
-
-        print(
-            "\n➡️ Breakout + Retest strategy "
-            "will NOT go live."
-        )
-
-        return
-
-    positive_configs.sort(
-        key=lambda x: x[2],
-        reverse=True
-    )
-
-    print(
-        f"\n✅ Positive training configs: "
-        f"{len(positive_configs)}"
-    )
-
-    for cfg in positive_configs:
-
-        print(
-            f"TP {cfg[0]:.2f} / "
-            f"SL {cfg[1]:.2f} | "
-            f"Trades {cfg[4]} | "
-            f"Avg R {cfg[2]:.3f} | "
-            f"Return {cfg[3] * 100:.2f}%"
-        )
-
-    # Best configuration
-    best_tp, best_sl = (
-        positive_configs[0][0],
-        positive_configs[0][1]
+    train_conditions = analyze_conditions(
+        d,
+        first_time,
+        train_end
     )
 
     # =====================================================
     # VALIDATION
     # =====================================================
 
-    print(
-        "\n"
-        "================================================"
-    )
-
-    print(
-        "VALIDATION"
-    )
-
-    print(
-        "================================================"
-    )
-
-    validation_trades = run_backtest(
+    validation_states = analyze_states(
         d,
-        validation_start_idx,
-        validation_end_idx,
-        best_tp,
-        best_sl
+        train_end,
+        validation_end,
+        "VALIDATION MARKET STATES"
     )
 
-    if (
-        len(validation_trades)
-        < MIN_VALIDATION_TRADES
-    ):
-
-        print(
-            f"\n⚠️ Validation trades "
-            f"too few: {len(validation_trades)}"
-        )
-
-        print(
-            "Validation result is not "
-            "strong enough to use live."
-        )
-
-        return
-
-    print_results(
-        "VALIDATION",
-        validation_trades,
-        best_tp,
-        best_sl
+    validation_conditions = analyze_conditions(
+        d,
+        train_end,
+        validation_end
     )
 
     # =====================================================
     # SAVE
     # =====================================================
 
-    validation_df = pd.DataFrame(
-        validation_trades
-    )
+    if not train_states.empty:
 
-    validation_df.to_csv(
-        "btc_breakout_retest_validation.csv",
-        index=False
-    )
+        train_states.to_csv(
+            "btc_market_state_training.csv",
+            index=False
+        )
+
+    if not validation_states.empty:
+
+        validation_states.to_csv(
+            "btc_market_state_validation.csv",
+            index=False
+        )
+
+    if not train_conditions.empty:
+
+        train_conditions.to_csv(
+            "btc_market_conditions_training.csv",
+            index=False
+        )
+
+    if not validation_conditions.empty:
+
+        validation_conditions.to_csv(
+            "btc_market_conditions_validation.csv",
+            index=False
+        )
 
     print(
-        "\n💾 Saved:"
-        " btc_breakout_retest_validation.csv"
-    )
-
-    # =====================================================
-    # FINAL DECISION
-    # =====================================================
-
-    avg_r = validation_df["r"].mean()
-    total_return = (
-        validation_df["net_return"].sum()
+        "\n💾 Results saved."
     )
 
     print(
@@ -1147,42 +989,26 @@ def main():
     )
 
     print(
-        "FINAL DECISION"
+        "IMPORTANT"
     )
 
     print(
         "================================================"
     )
 
-    if (
-        avg_r > 0
-        and total_return > 0
-    ):
+    print(
+        "\nএই test এখন কোনো BUY/SELL strategy "
+        "নির্বাচন করছে না।"
+    )
 
-        print(
-            "\n🟢 Validation is POSITIVE."
-        )
+    print(
+        "এটি শুধু দেখাচ্ছে কোন market condition-এ "
+        "BTC-এর historical movement ভালো ছিল।"
+    )
 
-        print(
-            "This strategy may be considered "
-            "for further paper testing."
-        )
-
-        print(
-            "⚠️ Do NOT immediately use "
-            "real money."
-        )
-
-    else:
-
-        print(
-            "\n🔴 Validation is NEGATIVE."
-        )
-
-        print(
-            "Do NOT put this strategy "
-            "into the live bot."
-        )
+    print(
+        "\n➡️ Output এখানে পাঠাও।"
+    )
 
 
 if __name__ == "__main__":
